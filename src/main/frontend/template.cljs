@@ -2,11 +2,8 @@
   "Provides template related functionality"
   (:require [clojure.string :as string]
             [frontend.date :as date]
-            [frontend.db.conn :as conn]
-            [frontend.db.utils :as db-utils]
             [frontend.state :as state]
-            [frontend.util.ref :as ref]
-            [logseq.db :as ldb]))
+            [frontend.util.ref :as ref]))
 
 (defn- variable-rules
   []
@@ -17,12 +14,7 @@
    "current page" (when-let [current-page (or
                                            (state/get-current-page)
                                            (date/today))]
-                    (let [block-uuid (parse-uuid current-page)
-                          page (if block-uuid
-                                 (db-utils/entity [:block/uuid block-uuid])
-                                 (ldb/get-page (conn/get-db) current-page))
-                          current-page' (:block/title page)]
-                      (when current-page' (ref/->page-ref current-page'))))})
+                    (ref/->page-ref current-page))})
 
 (def template-re #"<%([^%].*?)%>")
 

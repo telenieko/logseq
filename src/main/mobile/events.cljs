@@ -1,15 +1,26 @@
 (ns mobile.events
   "Mobile events"
-  (:require [frontend.components.quick-add :as quick-add]
-            [frontend.handler.events :as events]
+  (:require-macros [frontend.handler.events.macros :refer [defevent!]])
+  (:require [frontend.handler.events]
+            [frontend.state :as state]
             [mobile.components.recorder :as recorder]
-            [mobile.state :as mobile-state]))
+            [mobile.init :as init]
+            [mobile.state :as mobile-state]
+            [reitit.frontend.easy :as rfe]))
 
-(defmethod events/handle :dialog/mobile-quick-add [_]
-  (mobile-state/set-popup! {:open? true
-                            :content-fn (fn []
-                                          (quick-add/quick-add))
-                            :opts {:id :ls-quick-add}}))
+(defevent! :mobile/clear-edit [_]
+  (state/clear-edit!)
+  (init/keyboard-hide))
 
-(defmethod events/handle :mobile/start-audio-record [_]
-  (recorder/record! {:save-to-today? true}))
+(defevent! :mobile/start-audio-record [[_ {:keys [target-block save-to-today?]
+                                           :or {save-to-today? true}}]]
+  (recorder/record! (cond-> {:save-to-today? save-to-today?}
+                      target-block
+                      (assoc :target-block target-block))))
+
+(defevent! :mobile/redirect-to [[_ {:keys [k params query]}]]
+  (rfe/push-state k params query))
+
+(defevent! :mobile/set-tab [[_ tab]]
+  (when tab
+    (mobile-state/set-tab! tab)))

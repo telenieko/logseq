@@ -3,20 +3,21 @@
 This library provides an API to the
 frontend([datascript](https://github.com/tonsky/datascript)) and
 backend([SQLite](https://www.sqlite.org/index.html)) databases from the Logseq
-app and the CLI. The majority of this library is focused on supporting DB graphs
-but there are a few namespaces that support file graphs. This library is
-compatible with ClojureScript and with
+app and the CLI. This library defines the core schema and fns for DB graphs.
+There are a few namespaces that also support file graphs for the graph-parser.
+This library is compatible with ClojureScript and with
 [nbb-logseq](https://github.com/logseq/nbb-logseq) to respectively provide
 frontend and commandline functionality.
 
 ## API
 
 This library is under the parent namespace `logseq.db`. It provides the following namespaces:
-* `logseq.db` - main entry point serving both file and DB graphs
+* `logseq.db` - main public ns. Most often used by frontend
 * `logseq.db.frontend.*` - frontend namespaces for DB graphs
 * `logseq.db.sqlite.*` - backend/sqlite namespaces for DB graphs
-* `logseq.db.file-based.*` - namespaces for file graphs, mostly old namespaces
-* `logseq.db.common.*` - namespaces for both file and DB graphs
+* `logseq.db.common.*` - frontend and backend namespaces for DB graphs
+
+The following namespaces are used with file graphs via the graph-parser: `logseq.db.common.order, logseq.db.frontend.entity-util and logseq.db.common.entity-plus`.
 
 ## Usage
 
@@ -27,13 +28,13 @@ See the frontend for example usage.
 This follows the practices that [the Logseq frontend
 follows](/docs/dev-practices.md). Most of the same linters are used, with
 configurations that are specific to this library. See [this library's CI
-file](/.github/workflows/db.yml) for linting examples.
+file](/.github/workflows/deps-db.yml) for linting examples.
 
 ### Setup
 
-To run linters and tests, you'll want to install yarn dependencies once:
+To run linters and tests, you'll want to install pnpm dependencies once:
 ```
-yarn install
+pnpm install
 ```
 
 This step is not needed if you're just running the application.
@@ -46,11 +47,11 @@ usage:
 
 ```
 # Run all tests
-$ yarn test
+$ pnpm test
 # List available options
-$ yarn test -H
+$ pnpm test -H
 # Run tests with :focus metadata flag
-$ yarn test -i focus
+$ pnpm test -i focus
 ```
 ### Datalog linting
 

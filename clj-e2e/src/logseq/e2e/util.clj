@@ -7,10 +7,14 @@
             [logseq.e2e.locator :as loc]
             [wally.main :as w]
             [wally.repl :as repl])
-  (:import (com.microsoft.playwright Locator$PressSequentiallyOptions
-                                     Locator$FilterOptions
-                                     Page$GetByTextOptions)
-           (com.microsoft.playwright TimeoutError)))
+  (:import [com.microsoft.playwright
+            Locator$PressSequentiallyOptions
+            Locator$FilterOptions
+            Locator$ClickOptions
+            Page$GetByTextOptions
+            TimeoutError]
+           [com.microsoft.playwright.options
+            MouseButton]))
 
 (defn repeat-until-visible
   [n q repeat-fn]
@@ -44,8 +48,12 @@
       ;; ensure cursor exists
       ;; Sometimes when the editor exists, there isn't a blinking cursor,
       ;; causing subsequent operations (like pressing Enter) to fail.
-      (.focus editor)
-      editor)))
+      (try
+        (.focus editor)
+        editor
+        (catch TimeoutError error
+          (when (w/visible? editor-q)
+            (throw error)))))))
 
 (defn get-edit-block-container
   []
@@ -65,17 +73,18 @@
 
 (defn exit-edit
   []
-  (when (get-editor)
-    (k/esc))
+  (dotimes [_ 2]
+    (when (get-editor)
+      (k/esc)))
   (assert/assert-non-editor-mode))
 
 (defn double-esc
   "Exits editing mode and ensure there's no action bar"
   []
-  (when (w/visible? "div[data-radix-popper-content-wrapper]")
+  (when (w/visible? ".ui__popover-content, .ui__dropdown-menu-content, .ui__context-menu-content")
     (k/esc))
   (exit-edit)
-  (when (w/visible? "div[data-radix-popper-content-wrapper]")
+  (when (w/visible? ".ui__popover-content, .ui__dropdown-menu-content, .ui__context-menu-content")
     (k/esc)))
 
 (defn search
@@ -83,16 +92,22 @@
   (if (w/visible? ".cp__cmdk-search-input")
     (w/fill ".cp__cmdk-search-input" text)
     (do
-      (double-esc)
-      (assert/assert-in-normal-mode?)
-      (w/click :#search-button)
+      (k/press "ControlOrMeta+k")
+      (when-not (w/visible? ".cp__cmdk-search-input")
+        (double-esc)
+        (assert/assert-in-normal-mode?)
+        (w/click :#search-button))
       (w/wait-for ".cp__cmdk-search-input")
       (w/fill ".cp__cmdk-search-input" text))))
 
 (defn search-and-click
   [search-text]
   (search search-text)
-  (w/click (.first (w/get-by-test-id search-text))))
+  (let [result (.first (w/get-by-test-id search-text))]
+    (repeat-until-visible 5 result #(do
+                                      (search search-text)
+                                      (wait-timeout 300)))
+    (w/click result)))
 
 (defn wait-editor-gone
   ([]
@@ -115,7 +130,7 @@
 
 (defn page-blocks-count
   []
-  (count-elements ".ls-page-blocks .page-blocks-inner .ls-block"))
+  (count-elements ".ls-page-blocks .page-blocks-inner .ls-block:not(.block-add-button)"))
 
 (defn get-text
   [locator]
@@ -149,12 +164,12 @@
       :or {username "e2etest"
            password "Logseq-e2e"}}]
   (w/eval-js "localStorage.setItem(\"login-enabled\",true);")
-  (w/click "button[title=\"More\"]")
+  (w/click ".toolbar-dots-btn")
   (w/click "div:text(\"Login\")")
   (input username)
   (k/tab)
   (input password)
-  (w/click "button[type=\"submit\"]:text(\"Sign in\")")
+  (w/click ".cp__user-login button[type=\"submit\"]")
   (w/wait-for-not-visible ".cp__user-login"))
 
 (defn goto-journals
@@ -185,7 +200,9 @@
   (press-seq "/" {:delay 20})
   (w/wait-for ".ui__popover-content")
   (press-seq command {:delay 20})
-  (w/click "a.menu-link.chosen"))
+  (let [command-item (w/-query "a.menu-link.chosen")]
+    (assert/assert-is-visible command-item)
+    (w/click command-item)))
 
 (defn set-tag
   "`hidden?`: some tags may be hidden from the UI, e.g. Page"
@@ -210,3 +227,7 @@
   (if exact?
     (.getByText (w/get-page) text (.setExact (Page$GetByTextOptions.) true))
     (.getByText (w/get-page) text)))
+
+(defn right-click
+  [q]
+  (w/click q (-> (Locator$ClickOptions.) (.setButton MouseButton/RIGHT))))

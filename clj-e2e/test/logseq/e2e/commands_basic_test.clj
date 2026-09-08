@@ -2,20 +2,72 @@
   (:require
    [clojure.string :as string]
    [clojure.test :refer [deftest testing is use-fixtures]]
+   [jsonista.core :as json]
+   [logseq.e2e.api :refer [ls-api-call!]]
    [logseq.e2e.assert :as assert]
    [logseq.e2e.block :as b]
    [logseq.e2e.fixtures :as fixtures]
    [logseq.e2e.keyboard :as k]
    [logseq.e2e.locator :as loc]
    [logseq.e2e.util :as util]
-   [wally.main :as w]
-   [wally.repl :as repl]))
+   [wally.main :as w]))
 
 (use-fixtures :once fixtures/open-page)
 
 (use-fixtures :each
   fixtures/new-logseq-page
   fixtures/validate-graph)
+
+(def ^:private date-picker-day-selector
+  ".ui__calendar [role='gridcell'] button, .ui__calendar button[role='gridcell']")
+
+(defn- focused-date-picker-day
+  []
+  (json/read-value
+   (w/eval-js
+    (format
+     "(() => {
+       const active = document.activeElement;
+       const dayButton = active?.closest?.(%s);
+       return JSON.stringify({
+         focused: !!dayButton,
+         text: dayButton?.textContent ?? null,
+         label: dayButton?.getAttribute('aria-label') ?? dayButton?.textContent ?? null
+       });
+     })()"
+     (json/write-value-as-string date-picker-day-selector)))
+   json/keyword-keys-object-mapper))
+
+(defn- assert-date-picker-keyboard-navigation
+  [command]
+  (b/new-block (str command " keyboard test"))
+  (util/input-command command)
+  (w/wait-for date-picker-day-selector)
+  (let [initial (focused-date-picker-day)]
+    (is (:focused initial)
+        (str command " should focus a calendar day when opened."))
+    (k/arrow-right)
+    (let [right (focused-date-picker-day)]
+      (is (:focused right)
+          (str command " should keep calendar focus after ArrowRight."))
+      (is (not= (:label initial) (:label right))
+          (str command " should move focused date with ArrowRight."))
+      (k/arrow-left)
+      (is (= (:label initial) (:label (focused-date-picker-day)))
+          (str command " should move focused date back with ArrowLeft.")))
+    (k/arrow-down)
+    (let [down (focused-date-picker-day)]
+      (is (:focused down)
+          (str command " should keep calendar focus after ArrowDown."))
+      (is (not= (:label initial) (:label down))
+          (str command " should move focused date with ArrowDown."))
+      (k/arrow-up)
+      (is (= (:label initial) (:label (focused-date-picker-day)))
+          (str command " should move focused date back with ArrowUp.")))
+    (k/enter)
+    (if (= command "date picker")
+      (w/wait-for-not-visible ".ui__calendar")
+      (assert/assert-is-visible ".ui__calendar"))))
 
 (deftest command-trigger-test
   (testing "/command trigger popup"
@@ -92,7 +144,8 @@
     (w/wait-for ".CodeMirror")
     (util/wait-timeout 100)
     ;; create another block
-    (k/shift+enter)))
+    (k/shift+enter)
+    (assert/assert-is-hidden ".ls-page-blocks .block-tags")))
 
 (deftest math-block-test
   (testing "/math block"
@@ -100,13 +153,38 @@
     (util/input-command "math block")
     (util/press-seq "1 + 2 = 3")
     (util/exit-edit)
-    (w/wait-for ".katex")))
+    (w/wait-for ".katex")
+    (assert/assert-is-hidden ".ls-page-blocks .block-tags")))
 
 (deftest quote-test
   (testing "/quote"
     (b/new-block "")
     (util/input-command "quote")
-    (w/wait-for "div[data-node-type='quote']")))
+    (w/wait-for "div[data-node-type='quote']")
+    (assert/assert-is-hidden ".ls-page-blocks .block-tags")))
+
+(deftest quote-heading-test
+  (testing "quote headings render consistently"
+    (b/new-block "Property quote heading")
+    (util/input-command "quote")
+    (util/input-command "h1")
+    (util/exit-edit)
+    (b/new-block "# Markdown quote heading")
+    (util/input-command "quote")
+    (util/exit-edit)
+    (assert/assert-is-visible
+     "div[data-node-type='quote']:has(h1.block-title-wrap.as-heading:has-text('Property quote heading'))")
+    (assert/assert-is-visible
+     "div[data-node-type='quote']:has(h1.block-title-wrap.as-heading:has-text('Markdown quote heading'))")
+    (b/jump-to-block "Markdown quote heading")
+    (assert/assert-editor-mode)
+    (is (= "Markdown quote heading" (util/get-edit-content)))
+    (util/exit-edit)
+    (b/new-block "Plain quote")
+    (util/input-command "quote")
+    (util/exit-edit)
+    (assert/assert-is-visible
+     "div[data-node-type='quote']:has(span.block-title-wrap:has-text('Plain quote'))")))
 
 (deftest headings-test
   (testing "/heading"
@@ -154,13 +232,15 @@
         (util/input-command command)
         (k/enter)
         (assert/assert-editor-mode)
-        ;; FIXME: cannot exit edit by k/esc???
-        ;; (util/exit-edit)
-        (k/esc)
-        (b/new-block "temp fix")
         (util/exit-edit)
         (is (= command (util/get-text ".property-k")))
         (is (= "Today" (util/get-text ".ls-datetime a.page-ref")))))))
+
+(deftest date-command-keyboard-navigation-test
+  (testing "date commands focus the calendar and support keyboard navigation"
+    (doseq [command ["date picker" "Scheduled" "Deadline"]]
+      (fixtures/create-page)
+      (assert-date-picker-keyboard-navigation command))))
 
 ;; TODO: java "MMMM d, yyyy" vs js "MMM do, yyyy"
 (deftest date-time-test
@@ -225,15 +305,48 @@
       (w/click btn)
       (util/input "page reference")
       (w/click "a.menu-link:has-text('page reference')")
-      (w/click "a.menu-link:has-text('foo')")
+      (w/click (first (w/query "a.menu-link:has-text('foo')")))
       (assert/assert-is-visible "div:text('Live query (2)')"))))
+
+(deftest query-view-membership-updates-live
+  (testing "a mounted query view inserts and removes matching rows"
+    (let [tag "live-query-membership"
+          candidate-title "query membership candidate"]
+      (b/new-blocks [(format "[[%s]] query seed" tag)
+                     candidate-title
+                     ""])
+      (let [candidate-uuid (.getAttribute
+                            (.first
+                             (w/-query
+                              (format ".ls-block[data-block-title='%s']"
+                                      candidate-title)))
+                            "blockid")
+            candidate-row (format ".custom-query-results :text('%s')"
+                                  candidate-title)]
+        (is (string? candidate-uuid))
+        (util/input-command "query")
+        (w/click (util/-query-last "button:text('filter')"))
+        (util/input "page reference")
+        (w/click "a.menu-link:has-text('page reference')")
+        (w/click (first (w/query (format "a.menu-link:has-text('%s')" tag))))
+        (w/wait-for "div:text('Live query (1)')")
+
+        (ls-api-call! :editor.updateBlock
+                      candidate-uuid
+                      (format "[[%s]] %s" tag candidate-title))
+        (w/wait-for "div:text('Live query (2)')")
+        (w/wait-for candidate-row)
+
+        (ls-api-call! :editor.updateBlock candidate-uuid candidate-title)
+        (w/wait-for "div:text('Live query (1)')")
+        (w/wait-for-not-visible candidate-row)))))
 
 (deftest advanced-query-test
   (testing "query"
     (b/new-blocks ["[[bar]] block" "[[bar]] another" ""])
     (util/input-command "advanced query")
     (w/click ".ls-query-setting")
-    (w/click "pre.CodeMirror-line")
+    (w/click (.first (w/-query "pre.CodeMirror-line")))
     (util/input "{:query [:find (pull ?b [*])
 :where [?b :block/refs ?r]
 [?r :block/title \"bar\"]]}")
@@ -246,12 +359,13 @@
     (util/input-command "calculator")
     (util/input "1 + 2")
     (w/wait-for "div.extensions__code-calc-output-line")
-    (is (= "3" (util/get-text "div.extensions__code-calc-output-line")))))
+    (is (= "3" (util/get-text "div.extensions__code-calc-output-line")))
+    (assert/assert-is-hidden ".ls-page-blocks .block-tags")))
 
 (deftest template-test
   (testing "template"
     (b/new-block "template 1")
-    (util/set-tag "Template")
+    (util/set-tag "Template" :hidden? true)
     (b/new-blocks ["block 1" "block 2" "block 3" "test"])
     (k/arrow-up)
     (w/wait-for "textarea:text('block 3')")
@@ -298,5 +412,5 @@
     (util/input-command "cloze")
     (util/press-seq "hidden answer")
     (util/exit-edit)
-    (w/click "a.cloze")
-    (w/wait-for "a.cloze-revealed")))
+    (w/click "span.cloze")
+    (w/wait-for "span.cloze-revealed")))

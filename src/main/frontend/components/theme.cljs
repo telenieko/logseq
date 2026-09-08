@@ -2,27 +2,32 @@
   (:require [electron.ipc :as ipc]
             [frontend.components.settings :as settings]
             [frontend.config :as config]
-            [frontend.context.i18n :refer [t]]
+            [frontend.context.i18n :as i18n :refer [t]]
             [frontend.extensions.pdf.core :as pdf]
             [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.plugin-config :as plugin-config-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
-            [frontend.rum :refer [use-mounted]]
             [frontend.state :as state]
-            [frontend.storage :as storage]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [io.factorhouse.hsx.core :as hsx]
             [logseq.shui.hooks :as hooks]
-            [logseq.shui.ui :as shui]
-            [rum.core :as rum]))
+            [logseq.shui.ui :as shui]))
 
-(rum/defc scrollbar-measure
+(defn apply-current-graph-changed!
+  "Load graph-dependent CSS and notify plugins only after db-worker is ready."
+  [db-worker-ready?]
+  (when db-worker-ready?
+    (ui-handler/reset-custom-css!)
+    (plugin-handler/hook-plugin-app :current-graph-changed {})))
+
+(hsx/defc scrollbar-measure
   []
-  (let [*el (rum/use-ref nil)]
+  (let [*el (hooks/use-ref nil)]
     (hooks/use-effect!
      (fn []
-       (when-let [el (rum/deref *el)]
+       (when-let [el (hooks/deref *el)]
          (let [w (- (.-offsetWidth el) (.-clientWidth el))
                c "custom-scrollbar"
                l (.-classList js/document.documentElement)]
@@ -33,13 +38,12 @@
      {:ref   *el
       :class "top-1/2 -left-1/2 z-[-999]"}]))
 
-(defonce *once-theme-loaded? (volatile! false))
-
-(rum/defc ^:large-vars/cleanup-todo container < rum/static
+(hsx/defc ^:large-vars/cleanup-todo container
   [{:keys [route theme accent-color editor-font on-click current-repo db-restoring?
-           settings-open? sidebar-open? system-theme? sidebar-blocks-len onboarding-state preferred-language]} child]
-  (let [mounted-fn (use-mounted)
-        [restored-sidebar? set-restored-sidebar?] (rum/use-state false)]
+           settings-open? sidebar-open? system-theme? sidebar-blocks-len preferred-language]} child]
+  (let [mounted-fn (hooks/use-mounted)
+        [restored-sidebar? set-restored-sidebar?] (hooks/use-state false)
+        db-worker-ready? (hooks/use-atom-value state/db-worker-ready?)]
 
     (hooks/use-effect!
      #(let [^js doc js/document.documentElement
@@ -62,19 +66,21 @@
      [accent-color])
 
     (hooks/use-effect!
-     #(some-> js/document.documentElement
-              (.setAttribute "data-font" (or editor-font "default")))
+     (fn []
+       (when-let [{:keys [type global]} editor-font]
+         (doto js/document.documentElement
+           (.setAttribute "data-font" (or type "default"))
+           (.setAttribute "data-font-global" (boolean global)))))
      [editor-font])
 
     (hooks/use-effect!
-     #(let [doc js/document.documentElement]
-        (.setAttribute doc "lang" preferred-language)))
+     #(let [doc js/document.documentElement
+            preferred-language' (i18n/locale-tag preferred-language)]
+        (.setAttribute doc "lang" preferred-language'))
+     [preferred-language])
 
     (hooks/use-effect!
-     #(js/setTimeout
-       (fn [] (when-not @*once-theme-loaded?
-                (ipc/ipc :theme-loaded)
-                (vreset! *once-theme-loaded? true))) 100) ; Wait for the theme to be applied
+     #(ipc/ipc :theme-loaded)
      [])
 
     (hooks/use-effect!
@@ -94,16 +100,20 @@
 
     (hooks/use-effect!
      (fn []
-       (ui-handler/reset-custom-css!)
-       (ui-handler/set-file-graph-flag! (false? (config/db-based-graph? current-repo)))
        (pdf/reset-current-pdf!)
-       (plugin-handler/hook-plugin-app :current-graph-changed {}))
+       nil)
      [current-repo])
+
+    (hooks/use-effect!
+     (fn []
+       (apply-current-graph-changed! db-worker-ready?)
+       nil)
+     [current-repo db-worker-ready?])
 
     (hooks/use-effect!
      #(let [db-restored? (false? db-restoring?)]
         (if db-restoring?
-          (util/set-title! (t :loading))
+          (util/set-title! (t :ui/loading))
           (when db-restored?
             (route-handler/update-page-title! route))))
      [db-restoring? route])
@@ -133,20 +143,17 @@
        (if settings-open?
          (shui/dialog-open!
           (fn [] [:div.settings-modal (settings/settings settings-open?)])
-          {:label "app-settings"
+          {:label :app-settings
            :align :top
-           :content-props {:onOpenAutoFocus #(.preventDefault %)}
+           :content-props {:onOpenAutoFocus #(.preventDefault %)
+                           :style {:width "min(1024px, calc(100vw - 2rem))"
+                                   :max-width "calc(100vw - 2rem)"}}
            :id :app-settings})
          (shui/dialog-close! :app-settings)))
      [settings-open?])
 
-    (hooks/use-effect!
-     #(storage/set :file-sync/onboarding-state onboarding-state)
-     [onboarding-state])
-
     [:div#root-container.theme-container
-     {:on-click on-click
-      :tab-index -1}
+     {:on-click on-click}
      child
 
      (pdf/default-embed-playground)

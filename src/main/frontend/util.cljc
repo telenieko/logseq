@@ -2,36 +2,27 @@
   "Main ns for utility fns. This ns should be split up into more focused namespaces"
   #?(:clj (:refer-clojure :exclude [format]))
   #?(:cljs (:require-macros [frontend.util]))
-  #?(:cljs (:require
-            ["/frontend/selection" :as selection]
-            ["/frontend/utils" :as utils]
-            ["@capacitor/status-bar" :refer [^js StatusBar Style]]
-            ["@capacitor/core" :refer [Capacitor]]
-            ["@capacitor/clipboard" :as CapacitorClipboard]
-            ["grapheme-splitter" :as GraphemeSplitter]
-            ["sanitize-filename" :as sanitizeFilename]
-            ["check-password-strength" :refer [passwordStrength]]
-            ["path-complete-extname" :as pathCompleteExtname]
-            ["semver" :as semver]
-            [frontend.loader :refer [load]]
-            [cljs-bean.core :as bean]
-            [cljs-time.coerce :as tc]
-            [cljs-time.core :as t]
-            [clojure.pprint]
-            [dommy.core :as d]
-            [frontend.mobile.util :as mobile-util]
-            [logseq.common.util :as common-util]
-            [goog.dom :as gdom]
-            [goog.object :as gobj]
-            [goog.string :as gstring]
-            [goog.functions :as gfun]
-            [goog.userAgent]
-            [promesa.core :as p]
-            [rum.core :as rum]
-            [clojure.core.async :as async]
-            [frontend.pubsub :as pubsub]
-            [datascript.impl.entity :as de]
-            [logseq.common.config :as common-config]))
+  #?(:cljs (:require ["/frontend/selection" :as selection]
+                     ["/frontend/utils" :as utils]
+                     ["@capacitor/clipboard" :as CapacitorClipboard]
+                     ["@capacitor/core" :refer [Capacitor]]
+                     ["@capacitor/status-bar" :refer [^js StatusBar Style]]
+                     ["path-complete-extname" :as pathCompleteExtname]
+                     ["semver" :as semver]
+                     [cljs-bean.core :as bean]
+                     [cljs-time.core :as t]
+                     [clojure.pprint]
+                     [dommy.core :as d]
+                     [frontend.loader :refer [load]]
+                     [frontend.mobile.util :as mobile-util]
+                     [goog.dom :as gdom]
+                     [goog.functions :as gfun]
+                     [goog.object :as gobj]
+                     [goog.string :as gstring]
+                     [goog.userAgent]
+                     [logseq.common.config :as common-config]
+                     [logseq.common.util :as common-util]
+                     [promesa.core :as p]))
   #?(:cljs (:import [goog.async Debouncer]))
   (:require
    [clojure.pprint]
@@ -77,7 +68,7 @@
        (when-not node-test?
          (safe-re-find #"Mobi" js/navigator.userAgent)))
      (def mobile? (memoize mobile*?))
-     (def capacitor-new? (memoize #(and js/window (gobj/get js/window "isCapacitorNew"))))))
+     (def capacitor? (memoize #(and js/window (gobj/get js/window "isCapacitorNew"))))))
 
 #?(:cljs
    (extend-protocol IPrintWithWriter
@@ -93,54 +84,25 @@
 #?(:cljs (defonce ^js node-path utils/nodePath))
 #?(:cljs (defonce ^js sem-ver semver))
 #?(:cljs (defonce ^js full-path-extname pathCompleteExtname))
-#?(:cljs
-   (defn mobile-page-scroll
-     ([] (some-> (js/document.querySelector ".app-silk-index-scroll-content") (.-parentNode)))
-     ([el] (if el
-             (some-> (or (.closest el ".app-silk-scroll-content")
-                         (.closest el ".app-silk-index-scroll-content")) (.-parentNode))
-             (mobile-page-scroll)))))
 
 #?(:cljs (defn app-scroll-container-node
            ([]
-            (if (capacitor-new?)
-              (mobile-page-scroll)
-              (gdom/getElement "main-content-container")))
+            (or
+             (gdom/getElement "main-content-container")
+             (gdom/getElement "app-main-home")))
            ([el]
-            (if (capacitor-new?)
-              (mobile-page-scroll el)
-              (if (some-> el (.closest "#main-content-container"))
-                (app-scroll-container-node)
-                (or
-                 (gdom/getElementByClass "sidebar-item-list")
-                 (app-scroll-container-node)))))))
+            (if (or
+                 (some-> el (.closest "#main-content-container"))
+                 (some-> el (.closest "#app-main-home")))
+              (app-scroll-container-node)
+              (or
+               (gdom/getElementByClass "sidebar-item-list")
+               (app-scroll-container-node))))))
 #?(:cljs (defonce el-visible-in-viewport? utils/elementIsVisibleInViewport))
-#?(:cljs (defonce convert-to-roman utils/convertToRoman))
-#?(:cljs (defonce convert-to-letters utils/convertToLetters))
-#?(:cljs (defonce hsl2hex utils/hsl2hex))
-#?(:cljs (defonce base64string-to-unit8array utils/base64ToUint8Array))
-
 #?(:cljs (def string-join-path common-util/string-join-path))
 
 #?(:cljs
-   (do
-     (def uuid-string? common-util/uuid-string?)
-     (defn check-password-strength
-       {:malli/schema [:=> [:cat :string] [:maybe
-                                           [:map
-                                            [:contains [:sequential :string]]
-                                            [:length :int]
-                                            [:id :int]
-                                            [:value :string]]]]}
-       [input]
-       (when-let [^js ret (and (string? input)
-                               (not (string/blank? input))
-                               (passwordStrength input))]
-         (bean/->clj ret)))
-     (defn safe-sanitize-file-name
-       {:malli/schema [:=> [:cat :string] :string]}
-       [s]
-       (sanitizeFilename (str s)))))
+   (def uuid-string? common-util/uuid-string?))
 
 #?(:cljs
    (do
@@ -192,8 +154,10 @@
 #?(:cljs
    (defn set-change-value
      "compatible change event for React"
-     [node value]
-     (utils/triggerInputChange node value)))
+     ([node value]
+      (utils/triggerInputChange node value))
+     ([node value caret-pos]
+      (utils/triggerInputChange node value caret-pos))))
 
 #?(:cljs
    (defn p-handle
@@ -223,10 +187,6 @@
      []
      (p/do!
       (.setStyle StatusBar (clj->js {:style (.-Dark Style)})))))
-
-(defn find-first
-  [pred coll]
-  (first (filter pred coll)))
 
 (defn find-index
   "Find first index of an element in list"
@@ -371,10 +331,21 @@
     (.-selectionDirection input)))
 
 #?(:cljs
+   (defonce ^:private ^js grapheme-segmenter
+     (when (gobj/getValueByKeys js/globalThis "Intl" "Segmenter")
+       (js/Intl.Segmenter. "und" #js {:granularity "grapheme"}))))
+
+#?(:cljs
+   (defn- split-grapheme-clusters
+     [s]
+     (if grapheme-segmenter
+       (mapv #(.-segment ^js %) (js/Array.from (.segment grapheme-segmenter s)))
+       (vec (js/Array.from s)))))
+
+#?(:cljs
    (defn split-graphemes
      [s]
-     (let [^js splitter (GraphemeSplitter.)]
-       (.splitGraphemes splitter s))))
+     (split-grapheme-clusters s)))
 
 #?(:cljs
    (defn get-graphemes-pos
@@ -382,8 +353,7 @@
 
       multi-char count as 1, like emoji characters"
      [s from-index]
-     (let [^js splitter (GraphemeSplitter.)]
-       (.countGraphemes splitter (subs s 0 from-index)))))
+     (count (split-grapheme-clusters (subs s 0 from-index)))))
 
 #?(:cljs
    (defn get-line-pos
@@ -392,27 +362,10 @@
 
       multi-char count as 1, like emoji characters"
      [s from-newline-index]
-     (let [^js splitter (GraphemeSplitter.)
-           last-newline-pos (string/last-index-of s \newline (dec from-newline-index))
+     (let [last-newline-pos (string/last-index-of s \newline (dec from-newline-index))
            before-last-newline-length (or last-newline-pos -1)
            last-newline-content (subs s (inc before-last-newline-length) from-newline-index)]
-       (.countGraphemes splitter last-newline-content))))
-
-#?(:cljs
-   (defn get-text-range
-     "Return the substring of the first grapheme-num characters of s if first-line? is true,
-      otherwise return the substring of s before the last \n and the first grapheme-num characters.
-
-      grapheme-num treats multi-char as 1, like emoji characters"
-     [s grapheme-num first-line?]
-     (let [newline-pos (if first-line?
-                         0
-                         (inc (or (string/last-index-of s \newline) -1)))
-           ^js splitter (GraphemeSplitter.)
-           ^js newline-graphemes (.splitGraphemes splitter (subs s newline-pos))
-           ^js newline-graphemes (.slice newline-graphemes 0 grapheme-num)
-           content (.join newline-graphemes "")]
-       (subs s 0 (+ newline-pos (count content))))))
+       (count (split-grapheme-clusters last-newline-content)))))
 
 #?(:cljs
    (defn stop [e]
@@ -564,10 +517,6 @@
 #?(:cljs
    (def distinct-by-last-wins common-util/distinct-by-last-wins))
 
-(defn get-git-owner-and-repo
-  [repo-url]
-  (take-last 2 (string/split repo-url #"/")))
-
 (defn safe-lower-case
   [s]
   (if (string? s)
@@ -649,9 +598,9 @@
        (if-let [input (and (>= len 2) (<= current-pos len)
                            (.substring input (max (- current-pos 20) 0) current-pos))]
          (try
-           (let [^js splitter (GraphemeSplitter.)
-                 ^js input' (.splitGraphemes splitter input)]
-             (- current-pos (.-length (.pop input'))))
+           (if-let [last-grapheme (peek (split-grapheme-clusters input))]
+             (- current-pos (.-length last-grapheme))
+             (dec current-pos))
            (catch :default e
              (js/console.error e)
              (dec current-pos)))
@@ -666,9 +615,9 @@
        (if-let [input (and (>= len 2) (<= current-pos len)
                            (.substr input current-pos 20))]
          (try
-           (let [^js splitter (GraphemeSplitter.)
-                 ^js input (.splitGraphemes splitter input)]
-             (+ current-pos (.-length (.shift input))))
+           (if-let [first-grapheme (first (split-grapheme-clusters input))]
+             (+ current-pos (.-length first-grapheme))
+             (inc current-pos))
            (catch :default e
              (js/console.error e)
              (inc current-pos)))
@@ -782,20 +731,16 @@
 #?(:cljs
    (defn copy-to-clipboard!
      [text & {:keys [graph html blocks embed-block? owner-window]}]
-     (let [blocks (map (fn [block] (if (de/entity? block)
-                                     (-> (into {} block)
-                                         ;; FIXME: why :db/id is not included?
-                                         (assoc :db/id (:db/id block)))
-                                     block)) blocks)
+     (let [blocks (map identity blocks)
            data (clj->js
                  (common-util/remove-nils-non-nested
                   {:text text
                    :html html
                    :blocks (when (and graph (seq blocks))
                              (pr-str
-                              {:graph graph
+                               {:graph graph
                                :embed-block? embed-block?
-                               :blocks (mapv #(dissoc % :block.temp/load-status %) blocks)}))}))]
+                               :blocks (vec blocks)}))}))]
        (if owner-window
          (write-clipboard data owner-window)
          (write-clipboard data)))))
@@ -811,9 +756,7 @@
    (defn react
      [ref]
      (when ref
-       (if rum/*reactions*
-         (rum/react ref)
-         @ref))))
+       @ref)))
 
 #?(:cljs
    (def time-ms common-util/time-ms))
@@ -824,9 +767,6 @@
     (println (str "Debug " k))
     (time (reset! result (doall (f))))
     @result))
-
-#?(:cljs
-   (def concat-without-nil common-util/concat-without-nil))
 
 #?(:cljs
    (defn set-title!
@@ -949,24 +889,6 @@
        (boolean (and (safe-re-find #"Chrome" user-agent)
                      (safe-re-find #"Google Inc" vendor))))))
 
-#?(:cljs
-   (defn indexeddb-check?
-     "Check if indexedDB support is available, reject if not"
-     []
-     (let [db-name "logseq-indexeddb-check"]
-       (if js/window.indexedDB
-         (js/Promise. (fn [resolve reject]
-                        (let [req (js/window.indexedDB.open db-name)]
-                          (set! (.-onerror req) reject)
-                          (set! (.-onsuccess req)
-                                (fn [_event]
-                                  (.close (.-result req))
-                                  (let [req (js/window.indexedDB.deleteDatabase db-name)]
-                                    (set! (.-onerror req) reject)
-                                    (set! (.-onsuccess req) (fn [_event]
-                                                              (resolve true)))))))))
-         (p/rejected "no indexeddb defined")))))
-
 (defonce mac? #?(:cljs goog.userAgent/MAC
                  :clj nil))
 
@@ -1001,9 +923,6 @@
    (def safe-page-name-sanity-lc common-util/safe-page-name-sanity-lc))
 
 #?(:cljs
-   (def get-page-title common-util/get-page-title))
-
-#?(:cljs
    (defn add-style!
      [style]
      (when (some? style)
@@ -1024,13 +943,6 @@
                      (d/set-attr! :media "all"))]
            (d/append! parent-node link))))))
 
-(defn remove-common-preceding
-  [col1 col2]
-  (if (and (= (first col1) (first col2))
-           (seq col1))
-    (recur (rest col1) (rest col2))
-    [col1 col2]))
-
 ;; fs
 #?(:cljs
    (defn get-file-ext
@@ -1048,22 +960,6 @@
            dir (->> (butlast parts)
                     string-join-path)]
        [dir basename])))
-
-#?(:cljs
-   (defn get-relative-path
-     [current-file-path another-file-path]
-     (let [directories-f #(butlast (string/split % "/"))
-           parts-1 (directories-f current-file-path)
-           parts-2 (directories-f another-file-path)
-           [parts-1 parts-2] (remove-common-preceding parts-1 parts-2)
-           another-file-name (last (string/split another-file-path "/"))]
-       (->> (concat
-             (if (seq parts-1)
-               (repeat (count parts-1) "..")
-               ["."])
-             parts-2
-             [another-file-name])
-            string-join-path))))
 
 #?(:clj
    (defmacro profile
@@ -1086,35 +982,7 @@
         {:result ret#
          :time (- (cljs.core/system-time) start#)})))
 
-;; TODO: profile and profileEnd
-
-(comment
-  (= (get-relative-path "journals/2020_11_18.org" "pages/grant_ideas.org")
-     "../pages/grant_ideas.org")
-
-  (= (get-relative-path "journals/2020_11_18.org" "journals/2020_11_19.org")
-     "./2020_11_19.org")
-
-  (= (get-relative-path "a/b/c/d/g.org" "a/b/c/e/f.org")
-     "../e/f.org"))
-
 (defn keyname [key] (str (namespace key) "/" (name key)))
-
-;; FIXME: drain-chan was copied from frontend.worker-common.util due to shadow-cljs compile bug
-#?(:cljs
-   (defn drain-chan
-     "drop all stuffs in CH, and return all of them"
-     [ch]
-     (->> (repeatedly #(async/poll! ch))
-          (take-while identity))))
-
-#?(:cljs
-   (defn trace!
-     []
-     (js/console.trace)))
-
-#?(:cljs
-   (def remove-first common-util/remove-first))
 
 #?(:cljs
    (defn backward-kill-word
@@ -1198,19 +1066,6 @@
 
        {:y (- (:height viewport-rect) (:bottom target-rect))
         :x (- (:width viewport-rect) (:right target-rect))})))
-
-(def regex-char-esc-smap
-  (let [esc-chars "{}[]()&^%$#!?*.+|\\"]
-    (zipmap esc-chars
-            (map #(str "\\" %) esc-chars))))
-
-(defn regex-escape
-  "Escape all regex meta chars in text."
-  [text]
-  (string/join (replace regex-char-esc-smap text)))
-
-(comment
-  (re-matches (re-pattern (regex-escape "$u^8(d)+w.*[dw]d?")) "$u^8(d)+w.*[dw]d?"))
 
 #?(:cljs
    (defn meta-key? [e]
@@ -1297,7 +1152,9 @@
                          (.-nativeEvent e)
 
                          :else e))]
-       (.-isComposing native-event))))
+       (or (.-isComposing native-event)
+           (= (gobj/get native-event "keyCode") 229)
+           (= (gobj/get native-event "key") "Process")))))
 
 #?(:cljs
    (defn open-url
@@ -1389,13 +1246,51 @@
        (set! (.-src image) data-url))))
 
 #?(:cljs
-   (defn write-blob-to-clipboard
+   (def native-clipboard (gobj/get CapacitorClipboard "Clipboard")))
+
+#?(:cljs
+   (do
+     ;; Helper: Blob -> data URL (returns a JS Promise)
+     (defn blob->data-url [blob]
+       (js/Promise.
+        (fn [resolve reject]
+          (let [reader (js/FileReader.)]
+            (set! (.-onload reader)
+                  (fn [_e]
+                    ;; result is a "data:<mime>;base64,..." string
+                    (resolve (.-result reader))))
+            (set! (.-onerror reader)
+                  (fn [_e]
+                    (reject (.-error reader))))
+            (.readAsDataURL reader blob)))))
+
+     (defn write-blob-to-clipboard [blob]
+       (if native-clipboard
+         ;; 1) Native (Capacitor) path – expects a data URL
+         (-> (blob->data-url blob)
+             (.then (fn [data-url]
+                        ;; Your Capacitor plugin signature: { image: <data-url> }
+                      (.write native-clipboard #js {:image data-url})))
+             (.then (fn []
+                      (js/console.log "Copied via native clipboard")))
+             (.catch (fn [err]
+                       (js/console.error "Native clipboard failed" err))))
+
+         ;; 2) Web Clipboard API path (desktop browsers etc.)
+         (let [item (js/ClipboardItem.
+                     (js-obj (.-type blob) blob))]
+           (-> (.write (.-clipboard js/navigator) (array item))
+               (.then (fn []
+                        (js/console.log "Copied via web clipboard")))
+               (.catch (fn [err]
+                         (js/console.error "Web clipboard failed" err)))))))))
+
+#?(:cljs
+   (defn copy-image-blob-to-clipboard
      [blob]
-     (->> blob
-          (js-obj (.-type blob))
-          (js/ClipboardItem.)
-          (array)
-          (js/navigator.clipboard.write))))
+     (if (= (.-type blob) "image/png")
+       (write-blob-to-clipboard blob)
+       (image-blob->png blob write-blob-to-clipboard))))
 
 #?(:cljs
    (defn copy-image-to-clipboard
@@ -1403,10 +1298,7 @@
      (-> (js/fetch src)
          (.then (fn [data]
                   (-> (.blob data)
-                      (.then (fn [blob]
-                               (if (= (.-type blob) "image/png")
-                                 (write-blob-to-clipboard blob)
-                                 (image-blob->png blob write-blob-to-clipboard))))
+                      (.then copy-image-blob-to-clipboard)
                       (.catch js/console.error)))))))
 
 (defn memoize-last
@@ -1426,25 +1318,7 @@
           ret)
         @last-mem))))
 
-#?(:cljs
-   (do
-     (defn <app-wake-up-from-sleep-loop
-       "start a async/go-loop to check the app awake from sleep.
-Use (async/tap `pubsub/app-wake-up-from-sleep-mult`) to receive messages.
-Arg *stop: atom, reset to true to stop the loop"
-       [*stop]
-       (let [*last-activated-at (volatile! (tc/to-epoch (t/now)))]
-         (async/go-loop []
-           (if @*stop
-             (println :<app-wake-up-from-sleep-loop :stop)
-             (let [now-epoch (tc/to-epoch (t/now))]
-               (when (< @*last-activated-at (- now-epoch 10))
-                 (async/>! pubsub/app-wake-up-from-sleep-ch {:last-activated-at @*last-activated-at :now now-epoch}))
-               (vreset! *last-activated-at now-epoch)
-               (async/<! (async/timeout 5000))
-               (recur))))))))
-
-;; from rum
+;; requestAnimationFrame fallback
 #?(:cljs
    (def schedule
      (or (and (exists? js/window)
@@ -1479,16 +1353,33 @@ Arg *stop: atom, reset to true to stop the loop"
        (some-> target (.querySelector ".CodeMirror") (.-CodeMirror)))))
 
 #?(:cljs
-   (defn mobile-keep-keyboard-open
-     ([]
-      (mobile-keep-keyboard-open true))
-     ([schedule?]
-      (when (mobile?)
-        (let [f #(when-let [node (gdom/getElement "app-keep-keyboard-open-input")]
-                   (.focus node))]
-          (if schedule? (schedule f) (f)))))))
-
-#?(:cljs
    (defn rtc-test?
      []
      (string/includes? js/window.location.search "?rtc-test=true")))
+
+#?(:cljs
+   (defn rtc-test-without-virtualization?
+     []
+     (and (rtc-test?)
+          (not (string/includes? js/window.location.search "virtualized=true")))))
+
+#?(:cljs
+   (defn force-virtualization?
+     []
+     (string/includes? js/window.location.search "virtualized=true")))
+
+#?(:cljs
+   (defn sanitize-port-input
+     "Strips all non-digit characters from a port input string."
+     [value]
+     (some-> value
+             trim-safe
+             (string/replace #"\D" ""))))
+
+#?(:cljs
+   (defn normalize-port-input
+     "Normalizes a port input to a valid port number string (1–65535), or nil."
+     [value]
+     (let [digits (sanitize-port-input value)]
+       (when (seq digits)
+         (str (-> digits js/parseInt (max 1) (min 65535)))))))

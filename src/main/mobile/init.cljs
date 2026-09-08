@@ -11,8 +11,7 @@
             [frontend.state :as state]
             [frontend.util :as util]
             [lambdaisland.glogi :as log]
-            [logseq.shui.dialog.core :as shui-dialog]
-            [mobile.components.ui :as cc-ui]
+            [mobile.bottom-tabs :as bottom-tabs]
             [mobile.deeplink :as deeplink]
             [mobile.state :as mobile-state]
             [promesa.core :as p]))
@@ -23,43 +22,26 @@
 (def *last-shared-url (atom nil))
 (def *last-shared-seconds (atom 0))
 
-(defn- ios-init
+(defn- handle-incoming-url!
+  [url]
+  (p/then
+   state/app-ready-promise
+   (fn []
+     (when (and url
+                (or
+                 (string/starts-with? url "https://logseq.com/mobile/")
+                 (string/starts-with? url "logseq://mobile/")
+                 (not (and (= @*last-shared-url url)
+                           (<= (- (.getSeconds (js/Date.)) @*last-shared-seconds) 1)))))
+       (reset! *last-shared-url url)
+       (reset! *last-shared-seconds (.getSeconds (js/Date.)))
+       (deeplink/deeplink url)))))
+
+(defn- ios-init!
   "Initialize iOS-specified event listeners"
   []
-  (mobile-util/check-ios-zoomed-display))
-
-(defn- android-init
-  "Initialize Android-specified event listeners"
-  []
-  (.addListener App "backButton"
-                (fn []
-                  (when (false?
-                         (cond
-                           ;; lightbox
-                           (js/document.querySelector ".pswp")
-                           (some-> js/window.photoLightbox (.destroy))
-
-                           (shui-dialog/has-modal?)
-                           (shui-dialog/close!)
-
-                           (not-empty @mobile-state/*popup-data)
-                           (mobile-state/set-popup! nil)
-
-                           (not-empty (state/get-selection-blocks))
-                           (editor-handler/clear-selection!)
-
-                           (seq @mobile-state/*modal-blocks)
-                           (mobile-state/close-block-modal!)
-
-                           ;; TODO: move ui-related code to mobile events
-                           (not-empty (cc-ui/get-modal))
-                           (cc-ui/close-modal!)
-
-                           (state/editing?)
-                           (editor-handler/escape-editing)
-
-                           :else false))
-                    (prn "TODO: handle back button in Android")))))
+  (mobile-util/check-ios-zoomed-display)
+  (mobile-util/sync-ios-content-size!))
 
 (defn- app-state-change-handler
   "NOTE: don't add more logic in this listener, use mobile-flows instead"
@@ -82,24 +64,30 @@
                                             (js/window.location.reload)))))))))
   (reset! mobile-flows/*mobile-app-state (.-isActive state)))
 
-(defn- general-init
+(defn- sync-current-network-status! []
+  (-> (.getStatus Network)
+      (p/then #(reset! mobile-flows/*mobile-network-status %))
+      (p/catch (fn [error]
+                 (log/warn ::network-status-read-failed error)))))
+
+(defn- general-init!
   "Initialize event listeners used by both iOS and Android"
   []
   (.addListener App "appUrlOpen"
                 (fn [^js data]
                   (log/info ::app-url-open data)
-                  (p/then
-                   state/app-ready-promise
-                   (fn []
-                     (when-let [url (.-url data)]
-                       (when (or
-                              (string/starts-with? url "https://logseq.com/mobile/")
-                              (string/starts-with? url "logseq://mobile/")
-                              (not (and (= @*last-shared-url url)
-                                        (<= (- (.getSeconds (js/Date.)) @*last-shared-seconds) 1))))
-                         (reset! *last-shared-url url)
-                         (reset! *last-shared-seconds (.getSeconds (js/Date.)))
-                         (deeplink/deeplink url)))))))
+                  (when-let [url (.-url data)]
+                    (handle-incoming-url! url))))
+
+  (-> (.getLaunchUrl App)
+      (p/then (fn [^js data]
+                (when-let [url (.-url data)]
+                  (log/info ::launch-url data)
+                  (reset! mobile-state/*app-launch-url url)
+                  (when (= url "logseq://mobile/go/quick-add")
+                    (mobile-state/set-tab! "capture")
+                    (js/setTimeout #(bottom-tabs/select! "capture") 2000))
+                  (handle-incoming-url! url)))))
 
   (.addListener Keyboard "keyboardWillShow"
                 (fn [^js info]
@@ -114,6 +102,7 @@
                      #(util/scroll-to-top true))
 
   (.addListener App "appStateChange" app-state-change-handler)
+  (sync-current-network-status!)
   (.addListener Network "networkStatusChange" #(reset! mobile-flows/*mobile-network-status %)))
 
 (defn init! []
@@ -124,14 +113,11 @@
 
   (reset! mobile-flows/*network Network)
 
-  (when (mobile-util/native-android?)
-    (android-init))
-
   (when (mobile-util/native-ios?)
-    (ios-init))
+    (ios-init!))
 
   (when (mobile-util/native-platform?)
-    (general-init)))
+    (general-init!)))
 
 (defn keyboard-hide
   []
@@ -139,5 +125,6 @@
 
 (comment
   (defn keyboard-show
+    "Notice, iOS is not supported"
     []
     (.show Keyboard)))

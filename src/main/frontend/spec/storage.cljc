@@ -6,6 +6,7 @@
 (s/def ::ls-right-sidebar-state map?)
 (s/def ::ls-right-sidebar-width string?)
 (s/def ::ls-left-sidebar-open? boolean?)
+(s/def ::ls-cmdk-last-search map?)
 (s/def :ui/theme string?)
 (s/def :ui/system-theme? boolean?)
 (s/def ::lsp-core-enabled boolean?)
@@ -27,6 +28,9 @@
 (s/def :copy/export-block-text-indent-style string?)
 (s/def :copy/export-block-text-remove-options set?)
 (s/def :copy/export-block-text-other-options map?)
+(s/def ::sync-server-url string?)
+(s/def ::publish-server-url string?)
+(s/def ::ls-mobile-tabs (s/coll-of string? :kind vector?))
 ;; Dynamic keys which aren't as easily validated:
 ;; :ls-pdf-last-page-*
 ;; :ls-js-allowed-*
@@ -45,6 +49,7 @@
    :opt-un [::ls-right-sidebar-state
             ::ls-right-sidebar-width
             ::ls-left-sidebar-open?
+            ::ls-cmdk-last-search
             :ui/theme
             :ui/system-theme?
             :ui/recent-pages
@@ -65,4 +70,6 @@
             :copy/export-block-text-indent-style
             :copy/export-block-text-remove-options
             :copy/export-block-text-other-options
-            :file-sync/onboarding-state]))
+            ::sync-server-url
+            ::publish-server-url
+            ::ls-mobile-tabs]))

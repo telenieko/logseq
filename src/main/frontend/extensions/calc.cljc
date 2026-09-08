@@ -3,13 +3,14 @@
   (:require #?(:clj [clojure.java.io :as io])
             #?(:clj [instaparse.core :as insta]
                :cljs [instaparse.core :as insta :refer-macros [defparser]])
-
-            #?(:cljs [rum.core :as rum])
-
+            #?(:cljs [io.factorhouse.hsx.core :as hsx])
             #?(:cljs [shadow.resource :as rc])
             [bignumber.js :as bn]
             [clojure.string :as string]
-            [frontend.util :as util]))
+            [frontend.util :as util]
+            [instaparse.transform :as insta-transform]))
+
+#?(:cljs (set! *warn-on-infer* false))
 
 ;; ======================================================================
 ;; Interpreter
@@ -38,7 +39,7 @@
    (range 2 (inc n))))
 
 (defn eval* [env ast]
-  (insta/transform
+  (insta-transform/transform
    {:number     (comp bn/BigNumber #(string/replace % "," ""))
     :percent    (fn percent [a] (-> a (.dividedBy 100.00)))
     :scientific bn/BigNumber
@@ -217,9 +218,9 @@
 ;; UI
 
 #?(:cljs
-   (rum/defc results < rum/reactive
-     [calc-atom]
-     (when-let [output-lines (rum/react calc-atom)]
+   (hsx/defc results
+     [output-lines]
+     (when output-lines
        ;; the editor's parent will go into edit mode if any elements are clicked
        ;; if we stop click propagation on this element, we allow the user to
        ;; copy and paste the calc results
@@ -227,7 +228,7 @@
                                                             (.stopPropagation e))}
         ;; TODO: add react keys
         (for [[i line] (map-indexed vector output-lines)]
-          [:div.extensions__code-calc-output-line.CodeMirror-line {:key i}
+          [:div.extensions__code-calc-output-line {:key i}
            [:span (cond
                     (nil? line)           ""
                     (failure? line) "?"

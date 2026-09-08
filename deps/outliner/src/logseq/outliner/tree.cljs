@@ -2,34 +2,38 @@
   "Provides tree fns and INode protocol"
   (:require [datascript.core :as d]
             [datascript.impl.entity :as de]
-            [logseq.db :as ldb]
-            [logseq.db.common.property-util :as db-property-util]))
+            [logseq.db :as ldb]))
 
 (defprotocol INode
-  (-save [this *txs-state conn repo date-formatter opts])
+  (-save [this *txs-state conn opts])
   (-del [this *txs-state db]))
 
-(defn- blocks->vec-tree-aux
-  [repo db blocks root]
-  (let [root-id (:db/id root)
-        blocks (remove #(db-property-util/shape-block? repo db %) blocks)
-        parent-blocks (group-by #(get-in % [:block/parent :db/id]) blocks) ;; exclude whiteboard shapes
-        sort-fn (fn [parent]
-                  (when-let [children (get parent-blocks parent)]
-                    (ldb/sort-by-order children)))
-        block-children (fn block-children [parent level]
-                         (map (fn [m]
-                                (let [id (:db/id m)
-                                      children (-> (block-children id (inc level))
-                                                   (ldb/sort-by-order))]
-                                  (->
-                                   (assoc m
-                                          :block/level level
-                                          :block/children children
-                                          :block/parent {:db/id parent})
-                                   (dissoc :block/tx-id))))
-                              (sort-fn parent)))]
-    (block-children root-id 1)))
+(defn ^:api blocks->vec-tree-data
+  [blocks root {:keys [include-root? keep-block-tx-id?]}]
+  (if-not (:db/id root)
+    blocks
+    (let [root-id (:db/id root)
+          parent-blocks (group-by #(get-in % [:block/parent :db/id]) blocks)
+          sort-fn (fn [parent]
+                    (when-let [children (get parent-blocks parent)]
+                      (ldb/sort-by-order children)))
+          block-children (fn block-children [parent level]
+                           (mapv (fn [m]
+                                   (let [id (:db/id m)
+                                         children (block-children id (inc level))]
+                                     (cond-> (assoc m
+                                                    :block/level level
+                                                    :block/children children
+                                                    :block/parent {:db/id parent})
+                                       (not keep-block-tx-id?)
+                                       (dissoc :block/tx-id))))
+                                 (sort-fn parent)))
+          children (block-children root-id 1)]
+      (if include-root?
+        [(cond-> (assoc root :block/children children)
+           (not keep-block-tx-id?)
+           (dissoc :block/tx-id))]
+        children))))
 
 (defn- get-root-and-page
   [db root-id]
@@ -53,21 +57,18 @@
 ;; TODO: entity can already be used as a tree
 (defn blocks->vec-tree
   "`blocks` need to be in the same page."
-  [repo db blocks root-id & {:as option}]
+  [db blocks root-id & {:as option}]
   (let [blocks (map (fn [b] (if (de/entity? b)
                               (assoc (into {} b) :db/id (:db/id b))
                               b)) blocks)
         [page? root] (get-root-and-page db root-id)]
     (if-not root ; custom query
       blocks
-      (let [result (blocks->vec-tree-aux repo db blocks root)]
-        (if (and page? (not (:link option)))
-          result
-          ;; include root block
-          (let [root-block (some #(when (= (:db/id %) (:db/id root)) %) blocks)
-                root-block (-> (assoc root-block :block/children result)
-                               (dissoc :block/tx-id))]
-            [root-block]))))))
+      (let [include-root? (or (not page?) (:link option))
+            root (if include-root?
+                   (some #(when (= (:db/id %) (:db/id root)) %) blocks)
+                   root)]
+        (blocks->vec-tree-data blocks root {:include-root? include-root?})))))
 
 (defn- tree [parent->children root default-level]
   (let [root-id (:db/id root)
@@ -89,14 +90,18 @@
 
 (defn ^:api block-entity->map
   [e]
-  (cond-> {:db/id (:db/id e)
-           :block/uuid (:block/uuid e)
-           :block/parent {:db/id (:db/id (:block/parent e))}
-           :block/page (:block/page e)}
-    (:block/refs e)
-    (assoc :block/refs (:block/refs e))
-    (:block/children e)
-    (assoc :block/children (:block/children e))))
+  (if (de/entity? e)
+    (cond-> {:db/id (:db/id e)
+             :block/uuid (:block/uuid e)
+             :block/parent {:db/id (:db/id (:block/parent e))}
+             :block/page (:block/page e)}
+      (:block/refs e)
+      (assoc :block/refs (:block/refs e))
+      (:block/children e)
+      (assoc :block/children (:block/children e)))
+    (cond-> e
+      (:db/id (:block/parent e))
+      (assoc :block/parent {:db/id (:db/id (:block/parent e))}))))
 
 (defn ^:api filter-top-level-blocks
   [blocks]

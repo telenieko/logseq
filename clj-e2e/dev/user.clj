@@ -1,23 +1,37 @@
 (ns user
   "fns used on repl"
   (:require [clojure.test :refer [run-tests run-test]]
+            [logseq.e2e.assets-basic-test]
+            [logseq.e2e.bidirectional-properties-test]
+            [logseq.e2e.block-property-basic-test]
             [logseq.e2e.block :as b]
+            [logseq.e2e.cmdk-scroll-basic-test]
             [logseq.e2e.commands-basic-test]
             [logseq.e2e.config :as config]
             [logseq.e2e.editor-basic-test]
+            [logseq.e2e.export-basic-test]
             [logseq.e2e.fixtures :as fixtures]
+            [logseq.e2e.flashcards-basic-test]
             [logseq.e2e.graph :as graph]
+            [logseq.e2e.graph-navigation-basic-test]
+            [logseq.e2e.import-basic-test]
             [logseq.e2e.keyboard :as k]
             [logseq.e2e.locator :as loc]
             [logseq.e2e.multi-tabs-basic-test]
             [logseq.e2e.outliner-basic-test]
             [logseq.e2e.plugins-basic-test]
+            [logseq.e2e.plugins-marketplace-test]
             [logseq.e2e.property-basic-test]
+            [logseq.e2e.property-config-basic-test]
+            [logseq.e2e.property-scoped-choices-test]
             [logseq.e2e.reference-basic-test]
+            [logseq.e2e.right-sidebar-basic-test]
             [logseq.e2e.rtc-basic-test]
+            [logseq.e2e.rtc-extra-part2-test]
             [logseq.e2e.rtc-extra-test]
             [logseq.e2e.tag-basic-test]
             [logseq.e2e.util :as util]
+            [logseq.e2e.view-basic-test]
             [wally.main :as w]
             [wally.repl :as repl]))
 
@@ -44,6 +58,21 @@
   (->> (future (run-tests 'logseq.e2e.property-basic-test))
        (swap! *futures assoc :property-test)))
 
+(defn run-flashcards-basic-test
+  []
+  (->> (future (run-tests 'logseq.e2e.flashcards-basic-test))
+       (swap! *futures assoc :flashcards-test)))
+
+(defn run-property-scoped-choices-test
+  []
+  (->> (future (run-tests 'logseq.e2e.property-scoped-choices-test))
+       (swap! *futures assoc :property-scoped-choices-test)))
+
+(defn run-bidirectional-properties-test
+  []
+  (->> (future (run-tests 'logseq.e2e.bidirectional-properties-test))
+       (swap! *futures assoc :bidirectional-properties-test)))
+
 (defn run-outliner-test
   []
   (->> (future (run-tests 'logseq.e2e.outliner-basic-test))
@@ -69,6 +98,11 @@
   (->> (future (run-tests 'logseq.e2e.plugins-basic-test))
        (swap! *futures assoc :plugins-test)))
 
+(defn run-plugins-marketplace-test
+  []
+  (->> (future (run-tests 'logseq.e2e.plugins-marketplace-test))
+       (swap! *futures assoc :plugins-marketplace-test)))
+
 (defn run-rtc-extra-test
   []
   (->> (future (run-tests 'logseq.e2e.rtc-extra-test))
@@ -76,7 +110,13 @@
 
 (defn run-rtc-extra-test2
   [& _args]
-  (run-tests 'logseq.e2e.rtc-extra-test))
+  (run-tests 'logseq.e2e.rtc-extra-test)
+  (System/exit 0))
+
+(defn run-rtc-extra-part2-test2
+  [& _args]
+  (run-tests 'logseq.e2e.rtc-extra-part2-test)
+  (System/exit 0))
 
 (defn run-editor-basic-test
   []
@@ -89,52 +129,63 @@
        (swap! *futures assoc :tag-basic-test)))
 
 (defn run-all-basic-test
-  []
+  [& _]
   (run-tests 'logseq.e2e.editor-basic-test
+             'logseq.e2e.assets-basic-test
+             'logseq.e2e.block-property-basic-test
+             'logseq.e2e.cmdk-scroll-basic-test
              'logseq.e2e.commands-basic-test
+             'logseq.e2e.export-basic-test
+             'logseq.e2e.flashcards-basic-test
+             'logseq.e2e.graph-navigation-basic-test
+             'logseq.e2e.import-basic-test
              'logseq.e2e.multi-tabs-basic-test
              'logseq.e2e.outliner-basic-test
-             'logseq.e2e.rtc-basic-test
              'logseq.e2e.plugins-basic-test
-             'logseq.e2e.reference-basic-test
              'logseq.e2e.property-basic-test
-             'logseq.e2e.tag-basic-test))
+             'logseq.e2e.property-config-basic-test
+             'logseq.e2e.reference-basic-test
+             'logseq.e2e.right-sidebar-basic-test
+             'logseq.e2e.rtc-basic-test
+             'logseq.e2e.tag-basic-test
+             'logseq.e2e.view-basic-test)
+  (System/exit 0))
 
 (defn start
   []
   (future
-    (fixtures/open-page
-     repl/pause
-     {:headless false})))
+   (fixtures/open-page
+    repl/pause
+    {:headless false})))
 
 (comment
 
-  ;; You can call or put `(repl/pause)` in any test to pause the tests,
-  ;; this allows us to continue experimenting with the current page.
-  (repl/pause)
+ ;; You can call or put `(repl/pause)` in any test to pause the tests,
+ ;; this allows us to continue experimenting with the current page.
+ (repl/pause)
 
-  ;; To resume the tests, close the page/context/browser
-  (repl/resume)
+ ;; To resume the tests, close the page/context/browser
+ (repl/resume)
 
-  ;; Run specific test
-  (future (run-test logseq.e2e.commands-test/new-property-test))
+ ;; Run specific test
+ (future (run-test logseq.e2e.commands-test/new-property-test))
 
-  ;; after the test has been paused, you can do anything with the current page like this
-  (repl/with-page
-    (w/wait-for (first (util/get-edit-block-container))
-                {:state :detached}))
+ ;; after the test has been paused, you can do anything with the current page like this
+ (repl/with-page
+  (w/wait-for (first (util/get-edit-block-container))
+              {:state :detached}))
 
-  (run-tests 'logseq.e2e.commands-basic-test
-             'logseq.e2e.multi-tabs-basic-test
-             'logseq.e2e.outliner-basic-test
-             'logseq.e2e.rtc-basic-test)
+ (run-tests 'logseq.e2e.commands-basic-test
+            'logseq.e2e.multi-tabs-basic-test
+            'logseq.e2e.outliner-basic-test
+            'logseq.e2e.rtc-basic-test)
 
-  (do
-    (reset! config/*headless true)
-    (reset! config/*slow-mo 10)
-    (run-tests 'logseq.e2e.reference-basic-test)
-    (dotimes [i 10]
-      (run-tests 'logseq.e2e.reference-basic-test)))
+ (do
+   (reset! config/*headless true)
+   (reset! config/*slow-mo 10)
+   (run-tests 'logseq.e2e.reference-basic-test)
+   (dotimes [i 10]
+     (run-tests 'logseq.e2e.reference-basic-test)))
 
-  ;;
-  )
+ ;;
+ )

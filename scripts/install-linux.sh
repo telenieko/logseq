@@ -38,6 +38,11 @@ This script installs Logseq on Linux systems.
 
 USAGE:
     $0 [VERSION] [OPTIONS]
+    $0 uninstall
+
+COMMANDS:
+    install (default)   Install Logseq
+    uninstall           Removes Logseq installation (keeps user data)
 
 ARGUMENTS:
     VERSION    Version to install (e.g., "0.10.14"). Default: latest
@@ -57,6 +62,70 @@ EXAMPLES:
 
 For more information, visit: https://github.com/logseq/logseq
 HELP
+}
+
+uninstall() {
+    log_info "Searching for Logseq installations..."
+    
+    local user_removed=false
+    local system_removed=false
+    
+    # User installation paths
+    local -a user_paths=(
+        "$HOME/.local/share/logseq"
+        "$HOME/.local/bin/logseq"
+        "$HOME/.local/share/applications/logseq.desktop"
+        "$HOME/.local/share/icons/hicolor/512x512/apps/logseq.png"
+    )
+    
+    # System installation paths
+    local -a system_paths=(
+        "/opt/logseq"
+        "/usr/local/bin/logseq"
+        "/usr/share/applications/logseq.desktop"
+        "/usr/share/icons/hicolor/512x512/apps/logseq.png"
+    )
+    
+    # Remove user installation
+    log_info "Checking user installation..."
+    for path in "${user_paths[@]}"; do
+        if [[ -e "$path" ]] || [[ -L "$path" ]]; then
+            log_info "Removing: $path"
+            rm -rf "$path"
+            user_removed=true
+        fi
+    done
+    
+    # Remove system installation
+    log_info "Checking system-wide installation..."
+    for path in "${system_paths[@]}"; do
+        if [[ -e "$path" ]] || [[ -L "$path" ]]; then
+            if [[ "$EUID" -ne 0 ]]; then
+                log_warn "System-wide installation found at $path, but root privileges required"
+                log_warn "Run with sudo to uninstall system-wide installation"
+            else
+                log_info "Removing: $path"
+                rm -rf "$path"
+                system_removed=true
+            fi
+        fi
+    done
+    
+    # Update desktop databases
+    if [[ "$user_removed" == true ]] && [[ -d "$HOME/.local/share/applications" ]]; then
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+    fi
+    
+    if [[ "$system_removed" == true ]]; then
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+    fi
+    
+    # Final status message
+    if [[ "$user_removed" == true ]] || [[ "$system_removed" == true ]]; then
+        log_info "Logseq has been uninstalled successfully!"
+    else
+        log_warn "No Logseq installation found in default locations"
+    fi
 }
 
 # Parse command line arguments
@@ -86,6 +155,10 @@ while [[ $# -gt 0 ]]; do
         --verbose|-v)
             VERBOSE=true
             shift
+            ;;
+        uninstall)
+            uninstall
+            exit 0
             ;;
         -*)
             log_error "Unknown option: $1"
@@ -183,7 +256,7 @@ else
 fi
 
 # Fix sandbox permissions
-if [[ -f "$INSTALL_DIR/chrome-sandbox" ]]; then
+if [[ "$USER_INSTALL" == false && -f "$INSTALL_DIR/chrome-sandbox" ]]; then
     log_info "Setting sandbox permissions..."
     chown root:root "$INSTALL_DIR/chrome-sandbox"
     chmod 4755 "$INSTALL_DIR/chrome-sandbox"
@@ -192,12 +265,22 @@ fi
 # Desktop integration
 if [[ "$SKIP_DESKTOP" == false ]]; then
     log_info "Creating desktop integration..."
-    
+
     DESKTOP_FILE="/usr/share/applications/logseq.desktop"
     if [[ "$USER_INSTALL" == true ]]; then
         mkdir -p ~/.local/share/applications/
         DESKTOP_FILE="$HOME/.local/share/applications/logseq.desktop"
     fi
+
+    # Copy icon to standard location
+    if [[ "$USER_INSTALL" == true ]]; then
+        ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
+    else
+        ICON_DIR="/usr/share/icons/hicolor/512x512/apps"
+    fi
+    
+    # Ensure the directory exists regardless of install type
+    mkdir -p "$ICON_DIR"
     
     # Create desktop file
     cat > "$DESKTOP_FILE" << DESKTOP_EOF
@@ -205,8 +288,8 @@ if [[ "$SKIP_DESKTOP" == false ]]; then
 Version=1.0
 Name=Logseq
 Comment=Logseq - A privacy-first, open-source platform for knowledge management and collaboration
-Exec=$INSTALL_DIR/Logseq %U
-Icon=$INSTALL_DIR/resources/app.asar.unpacked/dist/icon.png
+Exec=$INSTALL_DIR/Logseq $([ "$USER_INSTALL" = true ] && echo "--no-sandbox") %U
+Icon=$ICON_DIR/logseq.png
 Terminal=false
 Type=Application
 Categories=Office;Productivity;Utility;TextEditor;
@@ -217,20 +300,18 @@ DESKTOP_EOF
     # Make desktop file executable
     chmod +x "$DESKTOP_FILE"
     
-    # Copy icon to standard location
-    if [[ -f "$INSTALL_DIR/resources/app.asar.unpacked/dist/icon.png" ]]; then
-        ICON_DIR="/usr/share/icons/hicolor/512x512/apps/"
-        if [[ "$USER_INSTALL" == true ]]; then
-            ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps/"
-            mkdir -p "$ICON_DIR"
-        fi
-        
+    # 1. Find and copy the icon (try current paths first, then fallbacks)
+    if [[ -f "$INSTALL_DIR/resources/app/icons/logseq.png" ]]; then
+        cp "$INSTALL_DIR/resources/app/icons/logseq.png" "$ICON_DIR/logseq.png"
+    elif [[ -f "$INSTALL_DIR/resources/app.asar.unpacked/dist/icon.png" ]]; then
         cp "$INSTALL_DIR/resources/app.asar.unpacked/dist/icon.png" "$ICON_DIR/logseq.png"
-        
-        # Update desktop file to use the copied icon
-        if [[ "$USER_INSTALL" == false ]]; then
-            sed -i 's|Icon=$INSTALL_DIR/resources/app.asar.unpacked/dist/icon.png|Icon=logseq|' "$DESKTOP_FILE"
-        fi
+    elif [[ -f "$INSTALL_DIR/resources/app/icon.png" ]]; then
+        cp "$INSTALL_DIR/resources/app/icon.png" "$ICON_DIR/logseq.png"
+    fi
+    
+    # 2. Update desktop file to use purely the icon name for system-wide installs
+    if [[ "$USER_INSTALL" == false ]]; then
+        sed -i "s|Icon=$ICON_DIR/logseq.png|Icon=logseq|" "$DESKTOP_FILE"
     fi
     
     # Update desktop database
@@ -246,7 +327,14 @@ rm -rf "$TEMP_DIR"
 
 # Verify installation
 if command -v logseq >/dev/null 2>&1; then
-    INSTALLED_VERSION=$(logseq --version 2>/dev/null | head -1 || echo "unknown")
+    # Safely extract the version number from `package.json` as a priority, preventing the script from hanging during the launch of the Electron process.
+    if [[ -f "$INSTALL_DIR/resources/app/package.json" ]]; then
+        INSTALLED_VERSION=$(grep -m 1 '"version"' "$INSTALL_DIR/resources/app/package.json" | cut -d'"' -f4 || echo "unknown")
+    else
+        # Fallback Plan: Add a 2-second timeout to forcibly terminate the process, preventing the application from hanging.
+        INSTALLED_VERSION=$(timeout 2 logseq --version 2>/dev/null | head -1 || echo "unknown")
+    fi
+    
     log_info "Logseq installed successfully!"
     log_info "Version: $INSTALLED_VERSION"
     log_info "Location: $INSTALL_DIR"

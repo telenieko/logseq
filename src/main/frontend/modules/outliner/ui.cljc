@@ -1,7 +1,7 @@
 (ns frontend.modules.outliner.ui
   #?(:cljs (:require-macros [frontend.modules.outliner.ui]))
   #?(:cljs (:require [frontend.state]
-                     [frontend.db.conn]
+                     [frontend.db.transact]
                      [logseq.outliner.op]
                      [frontend.modules.outliner.op]
                      [logseq.db])))
@@ -20,18 +20,8 @@
             ;;  (js/console.groupCollapsed "ui/transact!")
             ;;  (prn :ops r#)
             ;;  (js/console.trace)
-            ;;  (js/console.groupEnd)
-           (if test?#
-             (when (seq r#)
-               (logseq.outliner.op/apply-ops! (frontend.state/get-current-repo)
-                                              (frontend.db.conn/get-db false)
-                                              r#
-                                              (frontend.state/get-date-formatter)
-                                              ~opts))
-             (when (seq r#)
-               (frontend.state/<invoke-db-worker
-                :thread-api/apply-outliner-ops
-                (frontend.state/get-current-repo)
-                r#
-                (assoc ~opts
-                       :client-id (:client-id @frontend.state/state))))))))))
+           ;;  (js/console.groupEnd)
+           (frontend.db.transact/apply-outliner-ops
+            nil
+            r#
+            ~opts))))))

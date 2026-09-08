@@ -1,31 +1,32 @@
 (ns frontend.worker.pipeline
   "Pipeline work after transaction"
-  (:require [clojure.string :as string]
+  (:require [clojure.set :as set]
+            [clojure.string :as string]
             [datascript.core :as d]
             [frontend.worker-common.util :as worker-util]
             [frontend.worker.commands :as commands]
-            [frontend.worker.file :as file]
-            [frontend.worker.react :as worker-react]
-            [frontend.worker.shared-service :as shared-service]
+            [frontend.worker.render-affected-keys :as render-affected-keys]
             [frontend.worker.state :as worker-state]
-            [logseq.common.defkeywords :refer [defkeywords]]
             [logseq.common.util :as common-util]
+            [logseq.common.util.date-time :as date-time-util]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.common.uuid :as common-uuid]
             [logseq.db :as ldb]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.common.order :as db-order]
-            [logseq.db.common.sqlite :as common-sqlite]
             [logseq.db.frontend.class :as db-class]
-            [logseq.db.frontend.validate :as db-validate]
+            [logseq.db.frontend.property.build :as db-property-build]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.db.sqlite.export :as sqlite-export]
-            [logseq.db.sqlite.util :as sqlite-util]
             [logseq.graph-parser.exporter :as gp-exporter]
             [logseq.outliner.core :as outliner-core]
             [logseq.outliner.datascript-report :as ds-report]
-            [logseq.outliner.pipeline :as outliner-pipeline]))
+            [logseq.outliner.page :as outliner-page]
+            [logseq.outliner.pipeline :as outliner-pipeline]
+            [logseq.outliner.template :as outliner-template]))
 
 (def ^:private rtc-tx-or-download-graph?
-  (let [p (some-fn :rtc-op? :rtc-tx? :rtc-download-graph?)]
+  (let [p (some-fn :rtc-op? :rtc-tx? :rtc-download-graph? :transact-remote?)]
     (fn [tx-meta]
       (p tx-meta))))
 
@@ -36,145 +37,175 @@
           (contains? #{:collapse-expand-blocks :delete-blocks} outliner-op)
           (:undo? tx-meta) (:redo? tx-meta)))))
 
+(defn- imported-data?
+  [tx-meta]
+  (or (::gp-exporter/imported-data? tx-meta)
+      (::sqlite-export/imported-data? tx-meta)))
+
 (defn- rebuild-block-refs
-  [repo {:keys [tx-meta db-after]} blocks]
+  [{:keys [tx-meta db-after db-before]} blocks]
   (when (or (and (:outliner-op tx-meta) (refs-need-recalculated? tx-meta))
-            (:rtc-tx? tx-meta))
+            (:rtc-tx? tx-meta)
+            (:rtc-op? tx-meta)
+            (imported-data? tx-meta))
     (mapcat (fn [block]
-              (when (d/entity db-after (:db/id block))
-                (let [date-formatter (worker-state/get-date-formatter repo)
-                      refs (outliner-core/rebuild-block-refs repo db-after date-formatter block)]
-                  ;; Always retract because if refs is empty then a delete action has occurred
-                  (cond-> [[:db/retract (:db/id block) :block/refs]]
-                    (seq refs)
-                    (conj {:db/id (:db/id block)
-                           :block/refs refs})))))
+              (when (and (d/entity db-after (:db/id block))
+                         ;; don't compute refs for reactions
+                         (not (:logseq.property.reaction/target (d/entity db-after (:db/id block)))))
+                (let [refs (->> (outliner-core/rebuild-block-refs db-after block) set)
+                      old-refs (->> (:block/refs (d/entity db-before (:db/id block)))
+                                    (map :db/id)
+                                    set)
+                      added-refs (when (and (seq refs) (not= refs old-refs))
+                                   (set/difference refs old-refs))
+                      retracted-refs (when (and (seq old-refs) (not= refs old-refs))
+                                       (set/difference old-refs refs))]
+                  (concat
+                   (map (fn [id]
+                          [:db/retract (:db/id block) :block/refs id])
+                        retracted-refs)
+                   (map (fn [id]
+                          [:db/add (:db/id block) :block/refs id])
+                        added-refs)))))
             blocks)))
 
+(defn- journal-title
+  [db journal-day]
+  (date-time-util/int->journal-title
+   journal-day
+   (:logseq.property.journal/title-format (d/entity db :logseq.class/Journal))))
+
+(defn- ensure-template-journal-pages
+  [db blocks]
+  (reduce
+   (fn [{:keys [db tx-data] :as result} journal-day]
+     (if (ldb/get-journal-page-by-day db journal-day)
+       result
+       (let [{page-tx-data :tx-data} (outliner-page/create db (journal-title db journal-day) {:journal? true})]
+         (when-not (seq page-tx-data)
+           (throw (ex-info "failed to create template journal page" {:journal-day journal-day})))
+         {:db (:db-after (d/with db page-tx-data))
+          :tx-data (concat tx-data page-tx-data)})))
+   {:db db
+    :tx-data []}
+   (outliner-template/dynamic-template-journal-days blocks)))
+
 (defn- insert-tag-templates
-  [repo tx-report]
+  [tx-report]
   (let [db (:db-after tx-report)
         journal-id (:db/id (d/entity db :logseq.class/Journal))
         journal-page (some (fn [d] (when (and (= :block/journal-day (:a d)) (:added d))
                                      (d/entity db (:e d))))
                            (:tx-data tx-report))
-        journal-template? (some (fn [d] (and (:added d) (= (:a d) :block/tags) (= (:v d) journal-id))) (:tx-data tx-report))
-        tx-data (some->> (:tx-data tx-report)
-                         (filter (fn [d] (and (= (:a d) :block/tags) (:added d))))
-                         (group-by :e)
-                         (mapcat (fn [[e datoms]]
-                                   (let [object (d/entity db e)
-                                         template-blocks (->> (mapcat (fn [id]
-                                                                        (let [tag (d/entity db id)
-                                                                              parents (ldb/get-class-extends tag)
-                                                                              templates (mapcat :logseq.property/_template-applied-to (conj parents tag))]
-                                                                          (cond->> templates
-                                                                            journal-page
-                                                                            (map (fn [t] (assoc t :journal journal-page))))))
-                                                                      (set (map :v datoms)))
-                                                              distinct
-                                                              (sort-by :block/created-at)
-                                                              (mapcat (fn [template]
-                                                                        (let [template-blocks (rest (ldb/get-block-and-children db (:block/uuid template)
-                                                                                                                                {:include-property-block? true}))
-                                                                              blocks (->>
-                                                                                      (cons (assoc (first template-blocks) :logseq.property/used-template (:db/id template))
-                                                                                            (rest template-blocks))
-                                                                                      (map (fn [e]
-                                                                                             (cond->
-                                                                                              (assoc (into {} e) :db/id (:db/id e))
-                                                                                               (:journal template)
-                                                                                               (assoc :block/uuid
-                                                                                                      (common-uuid/gen-journal-template-block (:block/uuid (:journal template))
-                                                                                                                                              (:block/uuid e)))))))]
-                                                                          blocks))))]
-                                     (when (seq template-blocks)
-                                       (let [result (outliner-core/insert-blocks
-                                                     repo db template-blocks object
-                                                     {:sibling? false
-                                                      :keep-uuid? journal-template?
-                                                      :outliner-op :insert-template-blocks})]
-                                         (:tx-data result)))))))]
-    tx-data))
-
-(defkeywords
-  ::skip-validate-db? {:doc "tx-meta option, default = false"}
-  ::skip-store-conn {:doc "tx-meta option, skip `d/store` on conn. default = false"})
-
-(defn validate-db!
-  "Validate db is slow, we probably don't want to enable it for production."
-  [repo conn tx-report tx-meta context]
-  (when (and (not (::skip-validate-db? tx-meta false))
-             (or (:dev? context) (:undo? tx-meta) (:redo? tx-meta))
-             (not (:importing? context)) (sqlite-util/db-based-graph? repo))
-    (let [valid? (if (get-in tx-report [:tx-meta :reset-conn!])
-                   true
-                   (db-validate/validate-tx-report! tx-report (:validate-db-options context)))]
-      (when-not valid?
-        (when (and (or (get-in context [:validate-db-options :fail-invalid?]) worker-util/dev?)
-                   ;; don't notify on production when undo/redo failed
-                   (not (and (not (:dev? context)) (or (:undo? tx-meta) (:redo? tx-meta)))))
-          (shared-service/broadcast-to-clients! :notification
-                                                [["Invalid DB!"] :error]))
-        (throw (ex-info "Invalid data" {:graph repo})))))
-
-  ;; Ensure :block/order is unique for any block that has :block/parent
-  (when false;; (:dev? context)
-    (let [order-datoms (filter (fn [d] (= :block/order (:a d)))
-                               (:tx-data tx-report))]
-      (doseq [datom order-datoms]
-        (let [entity (d/entity @conn (:e datom))
-              parent (:block/parent entity)]
-          (when parent
-            (let [children (:block/_parent parent)
-                  order-different? (= (count (distinct (map :block/order children))) (count children))]
-              (when-not order-different?
-                (throw (ex-info (str ":block/order is not unique for children blocks, parent id: " (:db/id parent))
-                                {:children (->> (map (fn [b] (select-keys b [:db/id :block/title :block/order])) children)
-                                                (sort-by :block/order))
-                                 :tx-meta tx-meta
-                                 :tx-data (:tx-data tx-report)}))))))))))
+        journal-template? (some (fn [d] (and (:added d)
+                                             (= (:a d) :block/tags)
+                                             (= (:v d) journal-id)))
+                                (:tx-data tx-report))
+        tag->templates (fn [id]
+                         (let [tag (d/entity db id)
+                               parents (ldb/get-class-extends tag)
+                               templates (mapcat :logseq.property/_template-applied-to (conj parents tag))]
+                           (cond->> templates
+                             journal-page
+                             (map (fn [t] (assoc t :journal journal-page))))))
+        raw-template-blocks (fn [template]
+                              ;; Skip childless templates; (assoc nil ...) would create a nil-title block.
+                              (when-let [template-children (next (ldb/get-block-and-children db (:block/uuid template)
+                                                                                            {:include-property-block? true}))]
+                                (->> (cons (assoc (first template-children)
+                                                  :logseq.property/used-template (:db/id template))
+                                           (rest template-children))
+                                     (map (fn [block]
+                                            (cond->
+                                             (assoc (into {} block) :db/id (:db/id block))
+                                              (:journal template)
+                                              (assoc :block/uuid
+                                                     (common-uuid/gen-journal-template-block
+                                                      (:block/uuid (:journal template))
+                                                      (:block/uuid block)))))))))
+        tag-additions (->> (:tx-data tx-report)
+                           (filter (fn [d] (and (= (:a d) :block/tags) (:added d))))
+                           (group-by :e))
+        insertion-inputs (mapcat
+                          (fn [[e datoms]]
+                            (let [templates (->> (set (map :v datoms))
+                                                 (mapcat tag->templates)
+                                                 distinct
+                                                 (sort-by :block/created-at))]
+                              (map (fn [template]
+                                     {:object-id e
+                                      :blocks (raw-template-blocks template)})
+                                   templates)))
+                          tag-additions)
+        {db-with-pages :db page-tx-data :tx-data} (ensure-template-journal-pages db (mapcat :blocks insertion-inputs))
+        insert-tx-data (mapcat
+                        (fn [{:keys [object-id blocks]}]
+                          (let [object (d/entity db-with-pages object-id)
+                                blocks-to-insert (outliner-template/resolve-dynamic-template-blocks db-with-pages object blocks)]
+                            (when (seq blocks-to-insert)
+                              (let [result (outliner-core/insert-blocks
+                                            db-with-pages blocks-to-insert object
+                                            {:sibling? false
+                                             :keep-uuid? journal-template?
+                                             :outliner-op :insert-template-blocks})]
+                                (concat
+                                 (:tx-data result)
+                                 (mapcat (fn [block]
+                                           (when-let [refs (seq (outliner-pipeline/block-content-refs db-with-pages block))]
+                                             [{:db/id (:db/id block)
+                                               :block/refs refs}]))
+                                         (:blocks result)))))))
+                        insertion-inputs)]
+    (concat page-tx-data insert-tx-data)))
 
 (defn- fix-page-tags
   "Add missing attributes and remove #Page when inserting or updating block/title with inline tags"
   [{:keys [db-after tx-data tx-meta]}]
-  (when-not (rtc-tx-or-download-graph? tx-meta)
+  (when-not (:rtc-tx? tx-meta)
     (let [page-tag (d/entity db-after :logseq.class/Page)
           tag (d/entity db-after :logseq.class/Tag)]
       (assert page-tag "Page tag doesn't exist")
-      (->>
-       (keep
-        (fn [datom]
-          (cond
-            ;; add missing :db/ident and :logseq.property.class/extends for new tag
-            (and (= :block/tags (:a datom))
-                 (:added datom)
-                 (= (:v datom) (:db/id tag)))
-            (let [t (d/entity db-after (:e datom))]
-              (when (and (not (ldb/inline-tag? (:block/raw-title t) tag))
-                         (not (:db/ident t))) ; new tag without db/ident
-                (let [eid (:db/id t)]
-                  [[:db/add eid :db/ident (db-class/create-user-class-ident-from-name db-after (:block/title t))]
-                   [:db/add eid :logseq.property.class/extends :logseq.class/Root]
-                   [:db/retract eid :block/tags :logseq.class/Page]])))
+      (mapcat
+       (fn [datom]
+         (when (and (= :block/tags (:a datom))
+                    (:added datom))
+           (let [entity (d/entity db-after (:e datom))
+                 v-entity (d/entity db-after (:v datom))]
+             (cond
+             ;; add missing :db/ident and :logseq.property.class/extends for new tag
+               (and (= (:v datom) (:db/id tag))
+                    (not (ldb/inline-tag? (:block/raw-title entity) tag))
+                    (not (:db/ident entity)))
+               (let [eid (:db/id entity)]
+                 (if (:block/page entity)
+                   ;; Built-in #Tag should never turn a page child block into a class.
+                   [[:db/retract eid :block/tags :logseq.class/Tag]]
+                   [[:db/add eid :db/ident (db-class/create-user-class-ident-from-name db-after (:block/title entity))]
+                    [:db/add eid :logseq.property.class/extends :logseq.class/Root]
+                    [:db/retract eid :block/tags :logseq.class/Page]]))
 
-            ;; remove #Page from tags/journals/whitebaords, etc.
-            (and (= :block/tags (:a datom))
-                 (:added datom)
-                 (= (:db/id page-tag) (:v datom)))
-            (let [tags (->> (d/entity db-after (:e datom))
-                            :block/tags
-                            (map :db/ident)
-                            (remove #{:logseq.class/Page}))]
-              (when (and (seq tags)
-                         ;; has other page-classes other than `:logseq.class/Page`
-                         (some db-class/page-classes tags))
-                [[:db/retract (:e datom) :block/tags :logseq.class/Page]]))
+             ;; remove #Page from tags/journals etc.
+               (= (:db/id page-tag) (:v datom))
+               (let [tags (->> entity
+                               :block/tags
+                               (map :db/ident)
+                               (remove #{:logseq.class/Page}))]
+                 (when (and (seq tags)
+                          ;; has other page-classes other than `:logseq.class/Page`
+                            (some db-class/page-classes tags))
+                   [[:db/retract (:e datom) :block/tags :logseq.class/Page]]))
 
-            :else
-            nil))
-        tx-data)
-       (apply concat)))))
+             ;; Add other page classes to an existing page
+             ;; Caused by invalid tags data from server
+             ;; TODO: remove this case
+             ;; DEADLINE: 2025-11-30
+               (and (contains? (disj db-class/page-classes :logseq.class/Page) (:db/ident v-entity))
+                    (ldb/internal-page? entity))
+               [[:db/retract (:e datom) :block/tags :logseq.class/Page]]
+
+               :else
+               nil))))
+       tx-data))))
 
 (defn- remove-inline-page-class-from-title
   "Remove inline page tag from title"
@@ -210,9 +241,9 @@
        (apply concat)))))
 
 (defn- toggle-page-and-block
-  [conn {:keys [db-before db-after tx-data tx-meta]}]
+  [db {:keys [db-before db-after tx-data tx-meta]}]
   (when-not (rtc-tx-or-download-graph? tx-meta)
-    (let [page-tag (d/entity @conn :logseq.class/Page)
+    (let [page-tag (d/entity db :logseq.class/Page)
           library-page (ldb/get-library-page db-after)]
       (mapcat
        (fn [datom]
@@ -295,21 +326,72 @@
               (contains? ldb/node-display-type-classes (:db/ident (d/entity db (:v d))))
               (:added d))
          (when-let [display-type (ldb/get-display-type-by-class-ident (:db/ident (d/entity db (:v d))))]
-           [(cond->
-             {:db/id (:e d)
-              :logseq.property.node/display-type display-type}
-              (and (= display-type :code) (d/entity db :logseq.kv/latest-code-lang))
-              (assoc :logseq.property.code/lang (:kv/value (d/entity db :logseq.kv/latest-code-lang))))])))
+           (let [block (d/entity db (:e d))
+                 latest-code-lang (:kv/value (d/entity db :logseq.kv/latest-code-lang))]
+             [(cond->
+               {:db/id (:e d)
+                :logseq.property.node/display-type display-type}
+                (and (= display-type :code)
+                     (nil? (:logseq.property.code/lang block))
+                     latest-code-lang)
+                (assoc :logseq.property.code/lang latest-code-lang))]))))
      datoms)))
 
-(defn- invoke-hooks-for-imported-graph [conn {:keys [tx-meta] :as tx-report}]
-  (let [refs-tx-report (outliner-pipeline/transact-new-db-graph-refs conn tx-report)
-        full-tx-data (concat (:tx-data tx-report) (:tx-data refs-tx-report))
-        final-tx-report (-> (or refs-tx-report tx-report)
-                            (assoc :tx-data full-tx-data
-                                   :tx-meta tx-meta
-                                   :db-before (:db-before tx-report)))]
-    {:tx-report final-tx-report}))
+(defn- ensure-query-property-on-tag-additions
+  [tx-report]
+  (let [{:keys [db-after tx-data tx-meta]} tx-report
+        query-class (entity-plus/entity-memoized db-after :logseq.class/Query)
+        query-property (d/entity db-after :logseq.property/query)]
+    (when (and query-class
+               query-property
+               (not (rtc-tx-or-download-graph? tx-meta))
+               (not (:undo? tx-meta))
+               (not (:redo? tx-meta)))
+      (let [tagged-block-ids (->> tx-data
+                                  (filter (fn [d] (and (= :block/tags (:a d)) (:added d))))
+                                  (map :e)
+                                  (distinct))]
+        (mapcat
+         (fn [eid]
+           (when-let [block (d/entity db-after eid)]
+             (when (ldb/class-instance? query-class block)
+               (let [query-entity (:logseq.property/query block)]
+                 (when-not (and query-entity (:block/uuid query-entity))
+                   (let [query-text (if (string? query-entity) query-entity "")
+                         value-block (db-property-build/build-property-value-block
+                                      block
+                                      query-property
+                                      query-text
+                                      {:block-uuid (common-uuid/gen-uuid)})
+                         value-uuid (:block/uuid value-block)]
+                     [value-block
+                      (outliner-core/block-with-updated-at
+                       {:db/id (:db/id block)
+                        :logseq.property/query [:block/uuid value-uuid]})]))))))
+         tagged-block-ids)))))
+
+(defn- ensure-comments-blocks-property-on-tag-additions
+  [tx-report]
+  (let [{:keys [db-after tx-data tx-meta]} tx-report
+        comments-class (d/entity db-after :logseq.class/Comments)]
+    (when (and comments-class
+               (not (rtc-tx-or-download-graph? tx-meta))
+               (not (:undo? tx-meta))
+               (not (:redo? tx-meta)))
+      (->> tx-data
+           (keep (fn [datom]
+                   (when (and (= :block/tags (:a datom))
+                              (:added datom)
+                              (= (:db/id comments-class) (:v datom)))
+                     (:e datom))))
+           distinct
+           (keep (fn [eid]
+                   (when-let [block (d/entity db-after eid)]
+                     (when (and (:block/parent block)
+                                (not (seq (:logseq.property.comments/blocks block))))
+                       (outliner-core/block-with-updated-at
+                        {:db/id eid
+                         :logseq.property.comments/blocks (:db/id (:block/parent block))})))))))))
 
 (defn- gen-created-by-block
   [decoded-id-token]
@@ -345,7 +427,7 @@
                    ;; add created-by for new-block
                    (and (keyword-identical? :block/uuid attr)
                         (:added datom))
-                   (let [ent (d/entity db-after e)]
+                   (when-let [ent (d/entity db-after e)]
                      (when-not (:logseq.property/created-by-ref ent)
                        [:db/add e :logseq.property/created-by-ref created-by-id]))
 
@@ -355,135 +437,273 @@
                         (let [origin-title (:block/title (d/entity db-before e))]
                           (and (some? origin-title)
                                (string/blank? origin-title))))
-                   [:db/add e :logseq.property/created-by-ref created-by-id])))
+                   (when (d/entity db-after e)
+                     [:db/add e :logseq.property/created-by-ref created-by-id]))))
              tx-data)]
         (cond->> add-created-by-tx-data
           (nil? created-by-ent) (cons created-by-block))))))
 
+(defn- revert-disallowed-changes
+  [{:keys [tx-meta tx-data db-before db-after]}]
+  (when-not (or (rtc-tx-or-download-graph? tx-meta)
+                (:fix-db? tx-meta))
+    (let [built-in-page? (fn [id]
+                           (let [block (d/entity db-after id)]
+                             (and (contains? sqlite-create-graph/built-in-pages-names
+                                             (:block/title block))
+                                  (ldb/built-in? block))))
+          tx-data' (mapcat
+                    (fn [datom]
+                      (let [[e a v _t added] datom]
+                        (when added
+                          (cond
+                            ;; using built-in pages as tags
+                            (and (= a :block/tags) (built-in-page? v))
+                            [[:db/retract v :db/ident]
+                             [:db/retract v :logseq.property.class/extends]
+                             [:db/retract v :block/tags :logseq.class/Tag]
+                             [:db/add v :block/tags :logseq.class/Page]
+                             [:db/retract e a v]]
+
+                            ;; built-in block protected properties updated
+                            (and (contains? #{:db/ident :block/title :block/name :block/uuid
+                                              :logseq.property/type :db/cardinality
+                                              :logseq.property/built-in? :logseq.property.class/extends} a)
+                                 (some? (d/entity db-before e))
+                                 (let [block (d/entity db-after e)]
+                                   (and (ldb/built-in? block)
+                                        (not= (get block a) (get (d/entity db-before e) a)))))
+                            (if-some [prev-v (get (d/entity db-before e) a)]
+                              (if (= a :logseq.property.class/extends)
+                                [[:db/retract e a]
+                                 {:db/id e
+                                  a (map :db/id prev-v)}]
+                                [[:db/add e a prev-v]])
+                              [[:db/retract e a v]])
+
+                            ;; user class extends unexpected built-in classes
+                            (and (= a :logseq.property.class/extends)
+                                 (let [block (d/entity db-after v)]
+                                   (and (ldb/built-in? block)
+                                        (not (contains? #{:logseq.class/Root :logseq.class/Page :logseq.class/Property
+                                                          :logseq.class/Task :logseq.class/Card}
+                                                        (:db/ident block))))))
+                            (let [prev-v (get (d/entity db-before e) a)]
+                              [[:db/retract e a v]
+                               (if (seq prev-v)
+                                 {:db/id e
+                                  a (map :db/id prev-v)}
+                                 [:db/add e a :logseq.class/Root])])
+
+                            :else
+                            nil))))
+                    tx-data)]
+      (distinct tx-data'))))
+
 (defn- compute-extra-tx-data
-  [repo conn tx-report]
+  [tx-report]
   (let [{:keys [db-before db-after tx-data tx-meta]} tx-report
+        db db-after
+        revert-tx-data (revert-disallowed-changes tx-report)
         fix-page-tags-tx-data (fix-page-tags tx-report)
         fix-inline-page-tx-data (fix-inline-built-in-page-classes tx-report)
         toggle-page-and-block-tx-data (when (empty? fix-inline-page-tx-data)
-                                        (toggle-page-and-block conn tx-report))
+                                        (toggle-page-and-block db tx-report))
         display-blocks-tx-data (add-missing-properties-to-typed-display-blocks db-after tx-data tx-meta)
-        commands-tx (when-not (or (:undo? tx-meta) (:redo? tx-meta) (rtc-tx-or-download-graph? tx-meta))
-                      (commands/run-commands conn tx-report))
+        ensure-query-tx-data (ensure-query-property-on-tag-additions tx-report)
+        ensure-comments-tx-data (ensure-comments-blocks-property-on-tag-additions tx-report)
+        commands-tx (when-not (or (:undo? tx-meta)
+                                  (= :rebase (:outliner-op tx-meta))
+                                  (rtc-tx-or-download-graph? tx-meta))
+                      (commands/run-commands tx-report))
+        before-template-tx-data (concat revert-tx-data
+                                        toggle-page-and-block-tx-data
+                                        display-blocks-tx-data
+                                        ensure-query-tx-data
+                                        ensure-comments-tx-data
+                                        commands-tx)
+        template-db (if (seq before-template-tx-data)
+                      (:db-after (d/with db-after before-template-tx-data))
+                      db-after)
         insert-templates-tx (when-not (rtc-tx-or-download-graph? tx-meta)
-                              (insert-tag-templates repo tx-report))
+                              (insert-tag-templates (assoc tx-report :db-after template-db)))
         created-by-tx (add-created-by-ref-hook db-before db-after tx-data tx-meta)]
-    (concat toggle-page-and-block-tx-data
-            display-blocks-tx-data
-            commands-tx
+    (concat before-template-tx-data
             insert-templates-tx
             created-by-tx
             fix-page-tags-tx-data
             fix-inline-page-tx-data)))
 
-(defn- reverse-tx!
-  [conn tx-data]
-  (let [reversed-tx-data (map (fn [[e a v _tx add?]]
-                                (let [op (if add? :db/retract :db/add)]
-                                  [op e a v])) tx-data)]
-    (d/transact! conn reversed-tx-data {:revert-tx-data? true
-                                        :gen-undo-ops? false})))
+(def ^:private journal-protected-update-attrs
+  #{:block/title :block/name})
 
-(defn- undo-tx-data-if-disallowed!
-  [conn {:keys [tx-data tx-meta]}]
-  (when-not (:rtc-download-graph? tx-meta)
-    (let [db @conn
-          page-has-block-parent? (some (fn [d] (and (:added d)
-                                                    (= :block/parent (:a d))
-                                                    (ldb/page? (d/entity db (:e d)))
-                                                    (not (ldb/page? (d/entity db (:v d)))))) tx-data)]
-      ;; TODO: add other cases that need to be undo
-      (when page-has-block-parent?
-        (reverse-tx! conn tx-data)
-        (throw (ex-info "Page can't have block as parent"
-                        {:type :notification
-                         :payload {:message "Page can't have block as parent"
-                                   :type :warning}
-                         :tx-data tx-data}))))))
+(defn- ensure-journal-page-protected-attrs-not-updated!
+  [{:keys [db-before tx-data]}]
+  (when-let [violation
+             (some (fn [{:keys [e a v added]}]
+                     (when (and added
+                                (contains? journal-protected-update-attrs a))
+                       (let [before-ent (d/entity db-before e)]
+                         (when (and before-ent
+                                    (ldb/journal? before-ent)
+                                    (not= (get before-ent a) v))
+                           {:type :journal-page-protected-attr-updated
+                            :entity-id e
+                            :attr a
+                            :before (get before-ent a)
+                            :after v
+                            :journal-day (:block/journal-day before-ent)}))))
+                   tx-data)]
+    (throw (ex-info "journal page protected attr updated" violation))))
+
+(defn- projected-reference-content-datom?
+  [datom]
+  (not (contains? #{:block/tx-id :block/updated-at} (:a datom))))
+
+(defn- reference-attrs
+  [db]
+  (let [schema (d/schema db)
+        property-class-id (d/entid db :logseq.class/Property)
+        private-property-ids (into #{}
+                                   (map :e)
+                                   (d/datoms db :avet :logseq.property/public? false))]
+    (into #{:block/refs}
+          (keep (fn [datom]
+                  (let [property-id (:e datom)
+                        ident (some-> (first (d/datoms db :eavt property-id :db/ident))
+                                      :v)]
+                    (when (and ident
+                               (not (contains? private-property-ids property-id))
+                               (= :db.type/ref
+                                  (get-in schema [ident :db/valueType])))
+                      ident))))
+          (if property-class-id
+            (d/datoms db :avet :block/tags property-class-id)
+            []))))
+
+(def ^:private reference-attr-definition-attrs
+  #{:db/ident
+    :db/valueType
+    :block/tags
+    :logseq.property/public?})
+
+(defn- reference-owner-ids-at
+  [db reference-attrs' target-id]
+  (into #{}
+        (mapcat (fn [attr]
+                  (map :e (d/datoms db :avet attr target-id))))
+        reference-attrs'))
+
+(defn- projected-reference-owner-ids
+  [{:keys [db-before db-after tx-data]}]
+  (let [target-ids (into #{}
+                         (comp
+                          (filter projected-reference-content-datom?)
+                          (map :e)
+                          (filter #(d/entity db-before %)))
+                         tx-data)]
+    (if (empty? target-ids)
+      #{}
+      (let [reference-attrs-changed?
+            (some #(contains? reference-attr-definition-attrs (:a %)) tx-data)
+            before-reference-attrs (reference-attrs db-before)
+            after-reference-attrs (if reference-attrs-changed?
+                                    (reference-attrs db-after)
+                                    before-reference-attrs)]
+        (into #{}
+              (mapcat (fn [target-id]
+                        (concat
+                         (reference-owner-ids-at db-before before-reference-attrs target-id)
+                         (reference-owner-ids-at db-after after-reference-attrs target-id)
+                         (map :db/id
+                              (keep #(some-> (d/entity % target-id)
+                                             :block/closed-value-property)
+                                    [db-before db-after])))))
+              target-ids)))))
+
+(defn- revision-owner-ids
+  [{:keys [tx-data tx-meta] :as tx-report}]
+  (let [revision-datom? (if (:fix-db? tx-meta)
+                          #(not= :block/tx-id (:a %))
+                          projected-reference-content-datom?)]
+    (into (projected-reference-owner-ids tx-report)
+          (comp
+           (filter revision-datom?)
+           (map :e))
+          tx-data)))
+
+(defn transact-pipeline
+  "Compute extra tx-data and block refs, then stamp changed block entities and
+  projected reference owners. This function must stay pure and must not call
+  `d/transact!` or `ldb/transact!`."
+  [{:keys [db-after tx-meta _tx-data] :as tx-report}]
+  (let [derive-extra-data? (not (or (:sync-download-graph? tx-meta)
+                                    (:reverse? tx-meta)
+                                    (:transact-remote? tx-meta)
+                                    (imported-data? tx-meta)))
+        _ (when (and derive-extra-data?
+                     (not (rtc-tx-or-download-graph? tx-meta)))
+            (ensure-journal-page-protected-attrs-not-updated! tx-report))
+        extra-tx-data (when derive-extra-data?
+                        (compute-extra-tx-data tx-report))
+        tx-report* (if (seq extra-tx-data)
+                     (let [result (d/with db-after extra-tx-data)]
+                       (assoc tx-report
+                              :tx-data (concat (:tx-data tx-report) (:tx-data result))
+                              :db-after (:db-after result)))
+                     tx-report)
+        {:keys [blocks]} (ds-report/get-blocks-and-pages tx-report*)
+        deleted-blocks (outliner-pipeline/filter-deleted-blocks (:tx-data tx-report*))
+        deleted-block-ids (set (map :db/id deleted-blocks))
+        surviving-blocks (remove (fn [block]
+                                   (deleted-block-ids (:db/id block)))
+                                 blocks)
+        block-refs (when (and (or derive-extra-data?
+                                  (imported-data? tx-meta))
+                              (seq surviving-blocks))
+                     (rebuild-block-refs tx-report* surviving-blocks))
+        revision-owner-ids' (revision-owner-ids tx-report*)
+        tx-id-data (let [db-after (:db-after tx-report*)
+                         tx-id (inc (:max-tx db-after))]
+                     (into []
+                           (keep (fn [db-id]
+                                   (when (and (not (contains? deleted-block-ids db-id))
+                                              (:block/uuid (d/entity db-after db-id)))
+                                     {:db/id db-id
+                                      :block/tx-id tx-id})))
+                           revision-owner-ids'))
+        block-refs-tx-id-data (concat block-refs tx-id-data)
+        replace-tx-report (when (seq block-refs-tx-id-data)
+                            (d/with (:db-after tx-report*) block-refs-tx-id-data))
+        tx-report' (or replace-tx-report tx-report*)
+        full-tx-data (concat (:tx-data tx-report*)
+                             (:tx-data replace-tx-report))]
+    (assoc tx-report'
+           :tx-data full-tx-data
+           :tx-meta tx-meta
+           :db-before (:db-before tx-report)
+           :db-after (or (:db-after tx-report')
+                         (:db-after tx-report)))))
 
 (defn- invoke-hooks-default
-  [repo conn {:keys [tx-meta] :as tx-report} context]
-  ;; Notice: don't catch `undo-tx-data-if-disallowed!` since we want it failed immediately
-  (undo-tx-data-if-disallowed! conn tx-report)
+  [tx-report _context]
   (try
-    (let [extra-tx-data (when (sqlite-util/db-based-graph? repo)
-                          (compute-extra-tx-data repo conn tx-report))
-          tx-report* (if (seq extra-tx-data)
-                       (let [result (ldb/transact! conn extra-tx-data {:pipeline-replace? true
-                                                                       :outliner-op :pre-hook-invoke
-                                                                       :skip-store? true})]
-                         (assoc tx-report
-                                :tx-data (concat (:tx-data tx-report) (:tx-data result))
-                                :db-after (:db-after result)))
-                       tx-report)
-          {:keys [pages blocks]} (ds-report/get-blocks-and-pages tx-report*)
-          _ (when (common-sqlite/local-file-based-graph? repo)
-              (let [page-ids (distinct (map :db/id pages))]
-                (doseq [page-id page-ids]
-                  (when (d/entity @conn page-id)
-                    (file/sync-to-file repo page-id tx-meta)))))
-          deleted-blocks (outliner-pipeline/filter-deleted-blocks (:tx-data tx-report*))
-          deleted-block-ids (set (map :db/id deleted-blocks))
+    (let [{:keys [pages blocks]} (ds-report/get-blocks-and-pages tx-report)
+          deleted-blocks (outliner-pipeline/filter-deleted-blocks (:tx-data tx-report))
           deleted-block-uuids (set (map :block/uuid deleted-blocks))
+          deleted-block-ids (set (map :db/id deleted-blocks))
           _ (when (seq deleted-block-uuids)
               (swap! worker-state/*deleted-block-uuid->db-id merge
                      (zipmap (map :block/uuid deleted-blocks)
                              (map :db/id deleted-blocks))))
           deleted-assets (keep (fn [id]
-                                 (let [e (d/entity (:db-before tx-report*) id)]
+                                 (let [e (d/entity (:db-before tx-report) id)]
                                    (when (ldb/asset? e)
                                      {:block/uuid (:block/uuid e)
                                       :ext (:logseq.property.asset/type e)}))) deleted-block-ids)
-          blocks' (remove (fn [b] (deleted-block-ids (:db/id b))) blocks)
-          block-refs (when (seq blocks')
-                       (rebuild-block-refs repo tx-report* blocks'))
-          refs-tx-report (when (seq block-refs)
-                           (ldb/transact! conn block-refs {:pipeline-replace? true
-                                                           :skip-store? true}))
-          replace-tx (let [db-after (or (:db-after refs-tx-report) (:db-after tx-report*))]
-                       (concat
-                        ;; update block/tx-id
-                        (let [updated-blocks (remove (fn [b] (contains? deleted-block-ids (:db/id b)))
-                                                     (concat pages blocks))
-                              tx-id (get-in (or refs-tx-report tx-report*) [:tempids :db/current-tx])]
-                          (keep (fn [b]
-                                  (when-let [db-id (:db/id b)]
-                                    (when (:block/uuid (d/entity db-after db-id))
-                                      {:db/id db-id
-                                       :block/tx-id tx-id}))) updated-blocks))))
-          tx-report' (ldb/transact! conn replace-tx {:pipeline-replace? true
-                                                     ;; Ensure db persisted
-                                                     :db-persist? true})
-          _ (when-not (:revert-tx-data? tx-meta)
-              (try
-                (validate-db! repo conn tx-report* tx-meta context)
-                (catch :default e
-                  (when-not (rtc-tx-or-download-graph? tx-meta)
-                    (prn :debug :revert-invalid-tx
-                         :tx-meta
-                         tx-meta
-                         :tx-data
-                         (:tx-data tx-report*))
-                    (reverse-tx! conn (:tx-data tx-report*)))
-                  (throw e))))
-          full-tx-data (concat (:tx-data tx-report*)
-                               (:tx-data refs-tx-report)
-                               (:tx-data tx-report'))
-          final-tx-report (assoc tx-report'
-                                 :tx-data full-tx-data
-                                 :tx-meta tx-meta
-                                 :db-before (:db-before tx-report)
-                                 :db-after (or (:db-after tx-report')
-                                               (:db-after tx-report)))
-          affected-query-keys (when-not (or (:importing? context) (:rtc-download-graph? tx-meta))
-                                (worker-react/get-affected-queries-keys final-tx-report))]
-      {:tx-report final-tx-report
-       :affected-keys affected-query-keys
+          affected-keys (render-affected-keys/affected-keys tx-report)]
+      {:tx-report tx-report
+       :affected-keys affected-keys
        :deleted-block-uuids deleted-block-uuids
        :deleted-assets deleted-assets
        :pages pages
@@ -493,16 +713,5 @@
       (throw e))))
 
 (defn invoke-hooks
-  [repo conn {:keys [tx-meta] :as tx-report} context]
-  (when-not (or (:pipeline-replace? tx-meta)
-                (:revert-tx-data? tx-meta))
-    (let [{:keys [from-disk? new-graph?]} tx-meta]
-      (cond
-        (or from-disk? new-graph?)
-        {:tx-report tx-report}
-
-        (or (::gp-exporter/new-graph? tx-meta) (::sqlite-export/imported-data? tx-meta))
-        (invoke-hooks-for-imported-graph conn tx-report)
-
-        :else
-        (invoke-hooks-default repo conn tx-report context)))))
+  [_conn tx-report context]
+  (invoke-hooks-default tx-report context))

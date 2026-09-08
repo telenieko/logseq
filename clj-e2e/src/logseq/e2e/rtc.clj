@@ -1,5 +1,8 @@
 (ns logseq.e2e.rtc
   (:require [clojure.edn :as edn]
+            [logseq.e2e.assert :as assert]
+            [logseq.e2e.const :refer [*page1 *page2]]
+            [logseq.e2e.graph :as graph]
             [logseq.e2e.util :as util]
             [wally.main :as w]))
 
@@ -10,7 +13,7 @@
 
 (defmacro with-wait-tx-updated
   "exec body, then wait for the rtc-tx update.
-  Return the updated rtc-tx(local-tx and remote-tx)"
+  Return the updated rtc-tx{:local-tx ..., :remote-tx ...}"
   [& body]
   `(let [m# (get-rtc-tx)
          local-tx# (or (:local-tx m#) 0)
@@ -18,7 +21,7 @@
          _# (prn :current-rtc-tx m# local-tx# remote-tx#)
          tx# (max local-tx# remote-tx#)]
      ~@body
-     (loop [i# 5]
+     (loop [i# 15]
        (when (zero? i#) (throw (ex-info "wait-tx-updated failed" {:old m# :new (get-rtc-tx)})))
        (util/wait-timeout 500)
        (w/wait-for "button.cloud.on.idle" {:timeout 35000})
@@ -36,16 +39,21 @@
 (defn wait-tx-update-to
   [new-tx]
   (assert (int? new-tx))
-  (loop [i 5]
-    (when (zero? i) (throw (ex-info "wait-tx-update-to" {:update-to new-tx})))
+  (loop [i 15
+         last-rtc-tx nil]
+    (when (zero? i)
+      (throw (ex-info "wait-tx-update-to"
+                      {:update-to new-tx
+                       :last-rtc-tx last-rtc-tx})))
     (util/wait-timeout 1000)
+    (w/wait-for "button.cloud.on.idle" {:timeout 35000})
     (let [m (get-rtc-tx)
           local-tx (or (:local-tx m) 0)
           ;; remote-tx (or (:remote-tx m) 0)
           ]
       (if (>= local-tx new-tx)
         local-tx
-        (recur (dec i))))))
+        (recur (dec i) m)))))
 
 (defn rtc-start
   []
@@ -72,3 +80,13 @@
          (w/with-page p# (rtc-stop)))
        ~@body
        ~after-body)))
+
+(defn validate-graphs-in-2-pw-pages
+  []
+  (let [[p1-summary p2-summary]
+        (map
+         (fn [p]
+           (w/with-page p
+             (graph/validate-graph)))
+         [@*page1 @*page2])]
+    (assert/assert-graph-summary-equal p1-summary p2-summary)))

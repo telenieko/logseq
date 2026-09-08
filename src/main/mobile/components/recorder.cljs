@@ -5,24 +5,31 @@
             [cljs-time.local :as tl]
             [clojure.string :as string]
             [frontend.date :as date]
-            [frontend.db.model :as db-model]
+            [frontend.db.async :as db-async]
             [frontend.handler.editor :as editor-handler]
+            [frontend.mobile.audio-recorder :as audio-recorder]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.util :as util]
             [goog.functions :as gfun]
+            [lambdaisland.glogi :as log]
+            [logseq.common.config :as common-config]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [mobile.init :as init]
             [mobile.state :as mobile-state]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
 (defonce audio-file-format "yyyy-MM-dd HH:mm:ss")
+
 (def audio-length-limit 10)     ; 10 minutes
+(defonce *transcribe? (atom false))
 
 (def *last-edit-block (atom nil))
 (defn set-last-edit-block! [block] (reset! *last-edit-block block))
+
+(defonce *target-block (atom nil))
 
 (defn ms-to-time-format [ms]
   (let [total-seconds (quot ms 1000)
@@ -31,20 +38,17 @@
     (str (.padStart (str minutes) 2 "0") ":"
          (.padStart (str seconds) 2 "0"))))
 
-(defn- get-locale
+(defn- >ios-26
   []
-  (->
-   (p/let [^js lang (.getLanguageTag ^js Device)
-           value (.-value lang)]
-     (if (= value "en_CN")
-       "zh"
-       (string/replace value "-" "_")))
-   (p/catch (fn [e]
-              (js/console.error e)
-              "en_US"))))
+  (p/let [^js info (.getInfo ^js Device)
+          os (.-operatingSystem info)
+          vstr (.-osVersion info)
+          ;; vstr is like "26.0.1"
+          major (js/parseInt (first (.split vstr ".")) 10)]
+    (and (= os "ios") (>= major 26))))
 
 (defn save-asset-audio!
-  [blob locale]
+  [blob transcribe?]
   (let [ext (some-> blob
                     (.-type)
                     (string/split ";")
@@ -59,37 +63,49 @@
     (when-let [filename (some->> ext (str "Audio-"
                                           (date/get-date-time-string
                                            (tl/local-now)
-                                           {:formatter-str audio-file-format})
+                                          {:formatter-str audio-file-format})
                                           "."))]
-      (p/let [file (js/File. [blob] filename #js {:type (.-type blob)})
-              result (editor-handler/db-based-save-assets! (state/get-current-repo)
-                                                           [file]
-                                                           {:last-edit-block @*last-edit-block})
-              asset-entity (first result)]
-        (when (and asset-entity (util/ios?))
-          (p/let [buffer-data (.arrayBuffer blob)
-                  unit8-data (js/Uint8Array. buffer-data)]
-            (-> (.transcribeAudio2Text mobile-util/ui-local #js {:audioData (js/Array.from unit8-data)
-                                                                 :locale locale})
-                (p/then (fn [^js r]
-                          (let [content (.-transcription r)]
-                            (when-not (string/blank? content)
-                              (editor-handler/api-insert-new-block! content
-                                                                    {:block-uuid (:block/uuid asset-entity)
-                                                                     :sibling? false
-                                                                     :replace-empty-target? true
-                                                                     :edit-block? false})))))
-                (p/catch #(js/console.error "Error(transcribeAudio2Text):" %)))))))))
+      (-> (p/let [repo (state/get-current-repo)
+                  file (js/File. [blob] filename #js {:type (.-type blob)})
+                  capture? (= "capture" @mobile-state/*tab)
+                  save-to-page (when capture?
+                                 (db-async/<get-block repo common-config/quick-add-page-name {:children? false}))
+                  insert-opts (cond->
+                               {:last-edit-block @*last-edit-block}
+                                @*target-block
+                                (assoc :target-block @*target-block)
+                                capture?
+                                (assoc :save-to-page save-to-page))
+                  result (editor-handler/db-based-save-assets! repo [file] insert-opts)
+                  asset-entity (first result)]
+            (when (nil? asset-entity)
+              (log/error ::empty-asset-entity {}))
+            (when (and asset-entity transcribe?)
+              (p/let [buffer-data (.arrayBuffer blob)
+                      unit8-data (js/Uint8Array. buffer-data)]
+                (-> (.transcribeAudio2Text mobile-util/ui-local #js {:audioData (js/Array.from unit8-data)})
+                    (p/then (fn [^js r]
+                              (let [content (.-transcription r)]
+                                (when-not (string/blank? content)
+                                  (editor-handler/api-insert-new-block! content
+                                                                        {:block-uuid (:block/uuid asset-entity)
+                                                                         :sibling? false
+                                                                         :replace-empty-target? true
+                                                                         :edit-block? false})))))
+                    (p/catch #(log/error :transcribe-audio-error %))))))
+          (p/finally #(reset! *target-block nil))))))
 
-(rum/defc record-button
-  [*locale]
+(hsx/defc record-button
+  []
   (let [*timer-ref (hooks/use-ref nil)
-        *save? (hooks/use-ref nil)
         [*recorder _] (hooks/use-state (atom nil))
-        [locale set-locale!] (hooks/use-state nil)]
+        [*save? _] (hooks/use-state (atom nil))]
 
     (hooks/use-effect!
      (fn []
+       (when-not @*transcribe?
+         (p/let [transcribe? (>ios-26)]
+           (reset! *transcribe? transcribe?)))
        (let [^js node (js/document.getElementById "wave-container")
              ^js wave-l (.querySelector node ".wave-left")
              ^js wave-r (.querySelector node ".wave-right")
@@ -111,9 +127,9 @@
                                  (.start w1)
                                  (.start w2)))
            (.on "record-end" (fn [^js blob]
-                               (when (true? (rum/deref *save?))
-                                 (save-asset-audio! blob @*locale))
-                               (mobile-state/close-popup!)))
+                               (when @*save?
+                                 (save-asset-audio! blob @*transcribe?))
+                               (shui/popup-hide!)))
            (.on "record-progress" (gfun/throttle
                                    (fn [time]
                                      (when @*recorder
@@ -121,10 +137,10 @@
                                          (.click (js/document.getElementById "recording-button"))
                                          (try
                                            (let [t (ms-to-time-format time)]
-                                             (when-let [node (rum/deref *timer-ref)]
+                                             (when-let [node (hooks/deref *timer-ref)]
                                                (set! (. node -textContent) t)))
                                            (catch js/Error e
-                                             (js/console.warn "WARN: bad progress time:" e))))))
+                                             (log/warn :bad-progress-time e))))))
                                    33))
            (.on "record-beat" (fn [value]
                                 (let [value' (cond
@@ -135,7 +151,7 @@
                                   (.notify beats value')))))
 
          ;; auto start
-         (.startRecording r)
+         (audio-recorder/start-recording! r)
          #(stop)))
      [])
 
@@ -150,79 +166,50 @@
        (shui/button {:variant :outline
                      :class "record-ctrl-btn rounded-full recording"
                      :on-click (fn []
-                                 (rum/set-ref! *save? true)
+                                 (reset! *save? true)
                                  (.stopRecording ^js @*recorder))}
-                    (shui/tabler-icon "player-stop" {:size 22}))]]
+                    (shui/tabler-icon "player-stop" {:size 22}))]]]))
 
-     (when locale
-       (when-not (string/starts-with? locale "en_")
-         (shui/button {:variant :outline
-                       :on-click (fn []
-                                   (reset! *locale "en_US")
-                                   (set-locale! "en_US"))}
-                      "English transcribe")))]))
-
-(rum/defc audio-recorder-aux < rum/static
+(hsx/defc audio-recorder-aux
   []
-  (let [[locale set-locale!] (hooks/use-state nil)
-        [system-locale set-system-locale!] (hooks/use-state nil)
-        [*locale] (hooks/use-state (atom nil))]
+  [:div.app-audio-recorder
+   [:div.flex.flex-row.justify-between.items-center.font-medium
+    [:div.opacity-70 (date/get-date-time-string (tl/local-now) {:formatter-str "yyyy-MM-dd"})]]
 
-    (hooks/use-effect!
-     (fn []
-       (p/let [locale (get-locale)]
-         (set-locale! locale)
-         (set-system-locale! locale)
-         (reset! *locale locale)))
-     [])
+   [:div#wave-container.app-wave-container
+    [:div.app-wave-needle]
+    [:div.wave-left]
+    [:div.wave-right.mirror]]
 
-    [:div.app-audio-recorder
-     [:div.flex.flex-row.justify-between.items-center.font-medium
-      [:div.opacity-70 (date/get-date-time-string (tl/local-now) {:formatter-str "yyyy-MM-dd"})]
-      (if (and (util/ios?) locale
-               (not (string/starts-with? system-locale "en_")))
-        (let [en? (string/starts-with? locale "en_")]
-          (shui/button
-           {:variant (if en? :default :outline)
-            :class (str "rounded-full " (if en? "opacity-100" "opacity-70"))
-            :on-click (fn []
-                        (reset! *locale "en_US")
-                        (set-locale! "en_US"))}
-           "EN transcribe"))
-        ;; hack: same height with en transcribe button
-        (shui/button
-         {:variant :outline
-          :class "rounded-full opacity-0"}
-         "EN transcribe"))]
-
-     [:div#wave-container.app-wave-container
-      [:div.app-wave-needle]
-      [:div.wave-left]
-      [:div.wave-right.mirror]]
-
-     (record-button *locale)]))
+   (record-button)])
 
 (defn- show-recorder
   []
-  (mobile-state/set-popup! {:open? true
-                            :content-fn (fn [] (audio-recorder-aux))
-                            :opts {:id :ls-audio-record
-                                   :default-height 300}}))
+  (shui/popup-show! nil
+                    (fn [] (audio-recorder-aux))
+                    {:id :ls-audio-record
+                     :default-height 300}))
 
 (defn record!
-  [& {:keys [save-to-today?]}]
+  [& {:keys [save-to-today? target-block]}]
   (let [editing-id (state/get-edit-input-id)
-        quick-add? (mobile-state/quick-add-open?)]
+        quick-add? (= "capture" @mobile-state/*tab)]
     (set-last-edit-block! nil)
-    (if-not (string/blank? editing-id)
-      (p/do!
-       (editor-handler/save-current-block!)
-       (let [block (db-model/query-block-by-uuid (:block/uuid (state/get-edit-block)))]
-         (if (or quick-add? save-to-today?)
-           (p/do!
-            (state/clear-edit!)
-            (init/keyboard-hide)
-            (show-recorder))
-           (do (set-last-edit-block! block)
-               (show-recorder)))))
-      (show-recorder))))
+    (reset! *target-block target-block)
+    (if target-block
+      (show-recorder)
+      (if-not (string/blank? editing-id)
+        (p/do!
+         (editor-handler/save-current-block!)
+         (p/let [block (when-let [edit-block (state/get-edit-block)]
+                         (db-async/<get-block (state/get-current-repo)
+                                              (:block/uuid edit-block)
+                                              {:children? false}))]
+           (if (or quick-add? save-to-today?)
+             (p/do!
+              (state/clear-edit!)
+              (init/keyboard-hide)
+              (show-recorder))
+             (do (set-last-edit-block! block)
+                 (show-recorder)))))
+        (show-recorder)))))

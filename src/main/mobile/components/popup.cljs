@@ -1,30 +1,116 @@
 (ns mobile.components.popup
   "Mobile popup"
-  (:require [frontend.handler.editor :as editor-handler]
+  (:require [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.ui :as ui]
-            [goog.object :as gobj]
             [logseq.shui.popup.core :as shui-popup]
-            [logseq.shui.silkhq :as silkhq]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
-            [mobile.init :as init]
             [mobile.state :as mobile-state]
-            [rum.core :as rum]))
+            [promesa.core :as p]
+            [io.factorhouse.hsx.core :as hsx]))
 
-(defonce *last-popup-modal? (atom nil))
+(defonce *last-popup? (atom nil))
+(defonce *last-popup-data (atom nil))
+(defonce *pending-native-sheet-data (atom nil))
 
-(defn wrap-calc-commands-popup-side
+(defn- popup-min-height
+  [default-height]
+  (cond
+    (false? default-height) nil
+    (number? default-height) default-height
+    :else 400))
+
+(defn- present-native-sheet!
+  [data]
+  (when-let [^js plugin mobile-util/native-bottom-sheet]
+    (let [{:keys [opts]} data
+          id (:id opts)
+          popup-exists? (and id (= id (get-in @*last-popup-data [:opts :id])))]
+      (when-not popup-exists?
+        (reset! *last-popup-data data)
+        (.present
+         plugin
+         (clj->js
+          (let [height (popup-min-height (:default-height opts))
+                height' (if (contains? #{:ls-icon-picker} id)
+                          760
+                          height)]
+            (cond-> {:allowFullHeight (not= (:type opts) :action-sheet)}
+              (int? height') (assoc :defaultHeight height')))))))))
+
+(defn- dismiss-native-sheet!
+  []
+  (when-let [^js plugin mobile-util/native-bottom-sheet]
+    (.dismiss plugin #js {})))
+
+(defn present-native-sheet-after-render!
+  [data]
+  (.requestAnimationFrame
+   js/window
+   (fn []
+     (.requestAnimationFrame
+      js/window
+      (fn []
+        (when (and (identical? data @*pending-native-sheet-data)
+                   (identical? data @mobile-state/*popup-data))
+          (reset! *pending-native-sheet-data nil)
+          (present-native-sheet! data)))))))
+
+(defn- notify-native-sheet-content-ready!
+  []
+  (when-let [^js plugin mobile-util/native-bottom-sheet]
+    (.requestAnimationFrame
+     js/window
+     (fn []
+       (.requestAnimationFrame
+        js/window
+        (fn []
+          (.contentReady plugin #js {})))))))
+
+(defn- handle-native-sheet-state!
+  [^js data]
+  (let [presenting? (.-presenting data)
+        dismissing? (.-dismissing data)]
+    (cond
+      presenting?
+      (do
+       (mobile-state/set-popup-presenting! true)
+       (notify-native-sheet-content-ready!))
+
+      dismissing?
+      (p/do!
+       (when (some? @mobile-state/*popup-data)
+         (state/pub-event! [:mobile/clear-edit])
+         (mobile-state/set-popup! nil)
+         (when-let [plugin ^js mobile-util/native-editor-toolbar]
+           (.dismiss plugin)))
+       (mobile-state/set-popup-presenting! false)
+       (reset! *last-popup? false)
+       (reset! *last-popup-data nil)
+       (reset! *pending-native-sheet-data nil)
+       (notify-native-sheet-content-ready!))
+
+      :else
+      nil)))
+
+(defonce native-sheet-listener
+  (when-let [^js plugin (when (mobile-util/native-platform?)
+                          mobile-util/native-bottom-sheet)]
+    (.addListener plugin "state" handle-native-sheet-state!)))
+
+(defn- wrap-calc-commands-popup-side
   [pos opts]
-  (let [[side mh] (let [[_x y _ height] pos
+  (let [[side _mh] (let [[_x y _ height] pos
                         vh (.-clientHeight js/document.body)
-                        [th bh] [y (- vh (+ y height) 310)]]
-                    (case (if (> bh 280) "bottom"
-                              (if (> (- th bh) 100)
-                                "top" "bottom"))
-                      "top" ["top" th]
+                        [th bh] [(- y 85) (- vh (+ y height) 310)]
+                        direction (if (> bh 280) "bottom"
+                                      (if (> (- th bh) 100)
+                                        "top" "bottom"))]
+                    (if (= "top" direction)
+                      ["top" th]
                       ["bottom" bh]))]
-    (-> (assoc opts :auto-side? false)
-        (assoc :max-popup-height mh)
+    (-> (assoc opts :auto-side? true)
         (assoc-in [:content-props :side] side))))
 
 (defn popup-show!
@@ -37,95 +123,73 @@
           _ (when max-h (js/document.documentElement.style.setProperty
                          (str "--" side "-popup-content-max-height") (str max-h "px")))
           pid (shui-popup/show! event content-fn opts)]
-      (reset! *last-popup-modal? false) pid)
+      (reset! *last-popup? false)
+      pid)
 
     dropdown-menu?
     (let [pid (shui-popup/show! event content-fn opts)]
-      (reset! *last-popup-modal? false) pid)
+      (reset! *last-popup? false)
+      pid)
 
     :else
     (when content-fn
-      (mobile-state/set-popup! {:open? true
-                                :content-fn content-fn
-                                :opts opts})
-      (reset! *last-popup-modal? true))))
+      (reset! *last-popup? true)
+      (when-let [_plugin ^js mobile-util/native-bottom-sheet]
+        (let [replace-presented? @mobile-state/*popup-presenting?
+              data {:open? true
+                    :content-fn content-fn
+                    :opts opts
+                    :replace-presented? replace-presented?}]
+          (if replace-presented?
+            (reset! *pending-native-sheet-data nil)
+            (do
+              (reset! *pending-native-sheet-data data)
+              (mobile-state/set-popup-presenting! false)))
+          (mobile-state/set-popup! data))))))
 
 (defn popup-hide!
   [& args]
   (cond
     (= :download-rtc-graph (first args))
     (do
-      (mobile-state/set-popup! nil)
-      (mobile-state/redirect-to-tab! "home"))
+      (dismiss-native-sheet!)
+      (mobile-state/set-tab! "home"))
 
     :else
-    (if (and @*last-popup-modal? (not (= (first args) :editor.commands/commands)))
-      (mobile-state/set-popup! nil)
+    (if (and @*last-popup? (not (= (first args) :editor.commands/commands)))
+      (if (some? @*pending-native-sheet-data)
+        (do
+          (reset! *pending-native-sheet-data nil)
+          (reset! *last-popup? false)
+          (reset! *last-popup-data nil)
+          (mobile-state/set-popup-presenting! false)
+          (mobile-state/set-popup! nil))
+        (dismiss-native-sheet!))
       (apply shui-popup/hide! args))))
 
 (set! shui/popup-show! popup-show!)
 (set! shui/popup-hide! popup-hide!)
 
-(rum/defc popup < rum/reactive
-  []
-  (let [{:keys [open? content-fn opts]} (rum/react mobile-state/*popup-data)
-        quick-add? (= :ls-quick-add (:id opts))
-        audio-record? (= :ls-audio-record (:id opts))
-        action-sheet? (= :action-sheet (:type opts))
-        default-height (:default-height opts)]
-
-    (when open?
-      (state/clear-edit!)
-      (init/keyboard-hide)
-
-      (silkhq/bottom-sheet
-       (merge
-        {:presented (boolean open?)
-         :onPresentedChange (fn [v?]
-                              (when (false? v?)
-                                (js/setTimeout
-                                 #(mobile-state/set-popup! nil) 300)))}
-        (:modal-props opts))
-       (silkhq/bottom-sheet-portal
-        (silkhq/bottom-sheet-view
-         {:class (str "app-silk-popup-sheet-view as-" (name (or (:type opts) "default")))
-          :inertOutside false
-          :onTravelStatusChange (fn [status]
-                                  (when (and quick-add? (= status "entering"))
-                                    (editor-handler/quick-add-open-last-block!)))
-          :onPresentAutoFocus #js {:focus false}}
-         (silkhq/bottom-sheet-backdrop
-          (when (or quick-add? audio-record?)
-            {:travelAnimation {:opacity (fn [data]
-                                          (let [progress (gobj/get data "progress")]
-                                            (js/Math.min (* progress 0.9) 0.9)))}}))
-         (silkhq/bottom-sheet-content
-          {:class "flex flex-col items-center p-2"}
-          (silkhq/bottom-sheet-handle)
-          (silkhq/scroll
-           {:as-child true}
-           (silkhq/scroll-view
-            {:class "app-silk-scroll-view overflow-y-scroll"
-             :scrollGestureTrap {:yEnd true}
-             :style {:min-height (cond
-                                   (false? default-height)
-                                   nil
-                                   (number? default-height)
-                                   default-height
-                                   :else
-                                   400)
-                     :max-height "80vh"}}
-            (silkhq/scroll-content
-             (let [title (or (:title opts) (when (string? content-fn) content-fn))
-                   content (if (fn? content-fn)
-                             (content-fn)
-                             (if-let [buttons (and action-sheet? (:buttons opts))]
-                               [:div.-mx-2
-                                (for [{:keys [role text]} buttons]
-                                  (ui/menu-link {:on-click #(some-> (:on-action opts) (apply [{:role role}]))
-                                                 :data-role role}
-                                                [:span.text-lg.flex.items-center text]))]
-                               (when-not (string? content-fn) content-fn)))]
-               [:div.w-full.app-silk-popup-content-inner.p-2
-                (when title [:h2.py-2.opacity-40 title])
-                content])))))))))))
+(hsx/defc popup
+  [{:keys [opts content-fn replace-presented?] :as data}]
+  (hooks/use-effect!
+   (fn []
+     (when-not replace-presented?
+       (present-native-sheet-after-render! data))
+     nil)
+   [data replace-presented?])
+  (let [title (or (:title opts) (when (string? content-fn) content-fn))
+        content (if (fn? content-fn)
+                  (content-fn)
+                  (if-let [buttons (:buttons opts)]
+                    [:div.-mx-2
+                     (for [{:keys [role text]} buttons]
+                       (ui/menu-link
+                        {:on-click #(some-> (:on-action opts) (apply [{:role role}]))
+                         :data-role role}
+                        [:span.text-lg.flex.items-center text]))]
+                    (when-not (string? content-fn) content-fn)))]
+    [:div {:class "flex flex-col items-center p-2 w-full h-full"}
+     [:div.app-popup
+      (when title [:h2.py-2.opacity-40 title])
+      content]]))

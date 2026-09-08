@@ -3,7 +3,7 @@
         archiveVersion = 1;
         classes = {
         };
-        objectVersion = 48;
+        objectVersion = 77;
         objects = {
 
 /* Begin PBXBuildFile section */
@@ -21,6 +21,9 @@
                 5FFF7D7427E343FA00B00DA8 /* ShareViewController.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 5FFF7D6A27E343FA00B00DA8 /* ShareViewController.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
                 7435D10C2704659F00AB88E0 /* FolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7435D10B2704659F00AB88E0 /* FolderPicker.swift */; };
                 7435D10F2704660B00AB88E0 /* FolderPicker.m in Sources */ = {isa = PBXBuildFile; fileRef = 7435D10E2704660B00AB88E0 /* FolderPicker.m */; };
+                A1B2C3D41E2F3A4B5C6D7E90 /* NativePageViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41E2F3A4B5C6D7E8F /* NativePageViewController.swift */; };
+                A1B2C3D41E2F3A4B5C6D7E92 /* SharedWebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41E2F3A4B5C6D7E91 /* SharedWebViewController.swift */; };
+                ABCDEF0123456789000000AB /* NativeTopBarPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF0123456789000000AA /* NativeTopBarPlugin.swift */; };
                 C3718FCEFAECFFB66E93FFC4 /* Pods_Logseq.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2E26D73EA097D0B3B22942E /* Pods_Logseq.framework */; };
                 CBF2D2DA2DE83CB8006338BE /* UILocalPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBF2D2D92DE83CB0006338BE /* UILocalPlugin.swift */; };
                 CBF2D2E22DE95970006338BE /* AppViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBF2D2E12DE95970006338BE /* AppViewController.swift */; };
@@ -28,10 +31,19 @@
                 D3490CC62E7CE9EA00E796A6 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D3490CC52E7CE9EA00E796A6 /* WidgetKit.framework */; };
                 D3490CC82E7CE9EA00E796A6 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D3490CC72E7CE9EA00E796A6 /* SwiftUI.framework */; };
                 D3490CD52E7CE9EB00E796A6 /* shortcutsExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = D3490CC42E7CE9EA00E796A6 /* shortcutsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+                D3989CC22ECB0E5700D06615 /* LiquidTabsRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3989CBE2ECB0E5700D06615 /* LiquidTabsRootView.swift */; };
+                D3989CC32ECB0E5700D06615 /* LiquidTabsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3989CBF2ECB0E5700D06615 /* LiquidTabsStore.swift */; };
+                D3989CC42ECB0E5700D06615 /* LiquidTabsPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3989CBD2ECB0E5700D06615 /* LiquidTabsPlugin.swift */; };
+                D3989CC52ECB0E5700D06615 /* NativeNavHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3989CC02ECB0E5700D06615 /* NativeNavHost.swift */; };
+                D3989CC82ECB174A00D06615 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3989CC72ECB174A00D06615 /* SceneDelegate.swift */; };
                 D39D1FE02E7DAFB000C903D1 /* LogseqIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = D39D1FDF2E7DAFB000C903D1 /* LogseqIntents.swift */; };
                 D39D1FE12E7DAFB000C903D1 /* LogseqIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = D39D1FDF2E7DAFB000C903D1 /* LogseqIntents.swift */; };
+                D3C620AA2ED4B9A80009CCDA /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C620A92ED4B9A80009CCDA /* Theme.swift */; };
                 D3D62A0A275C92880003FBDC /* FileContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3D62A09275C92880003FBDC /* FileContainer.swift */; };
                 D3D62A0C275C928F0003FBDC /* FileContainer.m in Sources */ = {isa = PBXBuildFile; fileRef = D3D62A0B275C928F0003FBDC /* FileContainer.m */; };
+                D3F4A5B62F1234567890ABCE /* NativeBottomSheetPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F4A5B62F1234567890ABCD /* NativeBottomSheetPlugin.swift */; };
+                D3F4A5B62F1234567890ABD4 /* NativeEditorToolbarPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F4A5B62F1234567890ABD3 /* NativeEditorToolbarPlugin.swift */; };
+                D3F4A5B62F1234567890ABD1 /* NativeSelectionActionBarPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F4A5B62F1234567890ABCF /* NativeSelectionActionBarPlugin.swift */; };
                 FE647FF427BDFEDE00F3206B /* FsWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE647FF327BDFEDE00F3206B /* FsWatcher.swift */; };
                 FE647FF627BDFEF500F3206B /* FsWatcher.m in Sources */ = {isa = PBXBuildFile; fileRef = FE647FF527BDFEF500F3206B /* FsWatcher.m */; };
                 FE96D6102A1B811A001ECE32 /* SharedData.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE96D60F2A1B811A001ECE32 /* SharedData.swift */; };
@@ -90,6 +102,9 @@
                 7435D10D2704660A00AB88E0 /* App-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "App-Bridging-Header.h"; sourceTree = "<group>"; };
                 7435D10E2704660B00AB88E0 /* FolderPicker.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = FolderPicker.m; sourceTree = "<group>"; };
                 8A489CEC51E94726DDD58810 /* Pods-Logseq.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Logseq.release.xcconfig"; path = "Target Support Files/Pods-Logseq/Pods-Logseq.release.xcconfig"; sourceTree = "<group>"; };
+                A1B2C3D41E2F3A4B5C6D7E8F /* NativePageViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePageViewController.swift; sourceTree = "<group>"; };
+                A1B2C3D41E2F3A4B5C6D7E91 /* SharedWebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedWebViewController.swift; sourceTree = "<group>"; };
+                ABCDEF0123456789000000AA /* NativeTopBarPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTopBarPlugin.swift; sourceTree = "<group>"; };
                 B2E26D73EA097D0B3B22942E /* Pods_Logseq.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Logseq.framework; sourceTree = BUILT_PRODUCTS_DIR; };
                 CBF2D2D92DE83CB0006338BE /* UILocalPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UILocalPlugin.swift; sourceTree = "<group>"; };
                 CBF2D2E12DE95970006338BE /* AppViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewController.swift; sourceTree = "<group>"; };
@@ -100,9 +115,18 @@
                 D3490CC52E7CE9EA00E796A6 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
                 D3490CC72E7CE9EA00E796A6 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
                 D3490CDA2E7CEA3900E796A6 /* shortcutsExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = shortcutsExtension.entitlements; sourceTree = "<group>"; };
+                D3989CBD2ECB0E5700D06615 /* LiquidTabsPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidTabsPlugin.swift; sourceTree = "<group>"; };
+                D3989CBE2ECB0E5700D06615 /* LiquidTabsRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidTabsRootView.swift; sourceTree = "<group>"; };
+                D3989CBF2ECB0E5700D06615 /* LiquidTabsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidTabsStore.swift; sourceTree = "<group>"; };
+                D3989CC02ECB0E5700D06615 /* NativeNavHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeNavHost.swift; sourceTree = "<group>"; };
+                D3989CC72ECB174A00D06615 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
                 D39D1FDF2E7DAFB000C903D1 /* LogseqIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogseqIntents.swift; sourceTree = "<group>"; };
+                D3C620A92ED4B9A80009CCDA /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
                 D3D62A09275C92880003FBDC /* FileContainer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = FileContainer.swift; sourceTree = "<group>"; };
                 D3D62A0B275C928F0003FBDC /* FileContainer.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = FileContainer.m; sourceTree = "<group>"; };
+                D3F4A5B62F1234567890ABCD /* NativeBottomSheetPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBottomSheetPlugin.swift; sourceTree = "<group>"; };
+                D3F4A5B62F1234567890ABD3 /* NativeEditorToolbarPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeEditorToolbarPlugin.swift; sourceTree = "<group>"; };
+                D3F4A5B62F1234567890ABCF /* NativeSelectionActionBarPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSelectionActionBarPlugin.swift; sourceTree = "<group>"; };
                 DE5650F4AD4E2242AB9C012D /* Pods-Logseq.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Logseq.debug.xcconfig"; path = "Target Support Files/Pods-Logseq/Pods-Logseq.debug.xcconfig"; sourceTree = "<group>"; };
                 FE647FF327BDFEDE00F3206B /* FsWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FsWatcher.swift; sourceTree = "<group>"; };
                 FE647FF527BDFEF500F3206B /* FsWatcher.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = FsWatcher.m; sourceTree = "<group>"; };
@@ -178,9 +202,21 @@
                 504EC3061FED79650016851F /* App */ = {
                         isa = PBXGroup;
                         children = (
+                                D3C620A92ED4B9A80009CCDA /* Theme.swift */,
+                                D3989CC72ECB174A00D06615 /* SceneDelegate.swift */,
+                                D3989CBD2ECB0E5700D06615 /* LiquidTabsPlugin.swift */,
+                                D3989CBE2ECB0E5700D06615 /* LiquidTabsRootView.swift */,
+                                D3989CBF2ECB0E5700D06615 /* LiquidTabsStore.swift */,
+                                D3989CC02ECB0E5700D06615 /* NativeNavHost.swift */,
                                 D39D1FDF2E7DAFB000C903D1 /* LogseqIntents.swift */,
+                                A1B2C3D41E2F3A4B5C6D7E8F /* NativePageViewController.swift */,
+                                A1B2C3D41E2F3A4B5C6D7E91 /* SharedWebViewController.swift */,
                                 CBF2D2E12DE95970006338BE /* AppViewController.swift */,
                                 CBF2D2D92DE83CB0006338BE /* UILocalPlugin.swift */,
+                                ABCDEF0123456789000000AA /* NativeTopBarPlugin.swift */,
+                                D3F4A5B62F1234567890ABCD /* NativeBottomSheetPlugin.swift */,
+                                D3F4A5B62F1234567890ABD3 /* NativeEditorToolbarPlugin.swift */,
+                                D3F4A5B62F1234567890ABCF /* NativeSelectionActionBarPlugin.swift */,
                                 5FF86329283B5ADB0047731B /* Utils.swift */,
                                 5FF8632B283B5BFD0047731B /* Utils.m */,
                                 D32752BF2754C5AB0039291C /* AppDebug.entitlements */,
@@ -422,10 +458,22 @@
                                 504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
                                 5FF8632C283B5BFD0047731B /* Utils.m in Sources */,
                                 FE647FF427BDFEDE00F3206B /* FsWatcher.swift in Sources */,
+                                D3989CC22ECB0E5700D06615 /* LiquidTabsRootView.swift in Sources */,
+                                D3989CC32ECB0E5700D06615 /* LiquidTabsStore.swift in Sources */,
+                                D3989CC42ECB0E5700D06615 /* LiquidTabsPlugin.swift in Sources */,
+                                D3989CC52ECB0E5700D06615 /* NativeNavHost.swift in Sources */,
+                                D3989CC82ECB174A00D06615 /* SceneDelegate.swift in Sources */,
                                 5FF8632A283B5ADB0047731B /* Utils.swift in Sources */,
                                 CBF2D2E22DE95970006338BE /* AppViewController.swift in Sources */,
                                 D3D62A0A275C92880003FBDC /* FileContainer.swift in Sources */,
                                 CBF2D2DA2DE83CB8006338BE /* UILocalPlugin.swift in Sources */,
+                                ABCDEF0123456789000000AB /* NativeTopBarPlugin.swift in Sources */,
+                                D3F4A5B62F1234567890ABCE /* NativeBottomSheetPlugin.swift in Sources */,
+                                D3F4A5B62F1234567890ABD4 /* NativeEditorToolbarPlugin.swift in Sources */,
+                                D3F4A5B62F1234567890ABD1 /* NativeSelectionActionBarPlugin.swift in Sources */,
+                                A1B2C3D41E2F3A4B5C6D7E90 /* NativePageViewController.swift in Sources */,
+                                D3C620AA2ED4B9A80009CCDA /* Theme.swift in Sources */,
+                                A1B2C3D41E2F3A4B5C6D7E92 /* SharedWebViewController.swift in Sources */,
                                 D3D62A0C275C928F0003FBDC /* FileContainer.m in Sources */,
                                 7435D10F2704660B00AB88E0 /* FolderPicker.m in Sources */,
                                 D39D1FE12E7DAFB000C903D1 /* LogseqIntents.swift in Sources */,
@@ -545,7 +593,7 @@
                                 GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
                                 GCC_WARN_UNUSED_FUNCTION = YES;
                                 GCC_WARN_UNUSED_VARIABLE = YES;
-                                IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+                                IPHONEOS_DEPLOYMENT_TARGET = 15.0;
                                 MTL_ENABLE_DEBUG_INFO = YES;
                                 ONLY_ACTIVE_ARCH = YES;
                                 SDKROOT = iphoneos;
@@ -599,7 +647,7 @@
                                 GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
                                 GCC_WARN_UNUSED_FUNCTION = YES;
                                 GCC_WARN_UNUSED_VARIABLE = YES;
-                                IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+                                IPHONEOS_DEPLOYMENT_TARGET = 15.0;
                                 MTL_ENABLE_DEBUG_INFO = NO;
                                 SDKROOT = iphoneos;
                                 SWIFT_COMPILATION_MODE = wholemodule;
@@ -628,7 +676,7 @@
                                         "$(inherited)",
                                         "@executable_path/Frameworks",
                                 );
-                                MARKETING_VERSION = 0.11.0;
+                                MARKETING_VERSION = 2.0.1;
                                 OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
                                 PRODUCT_BUNDLE_IDENTIFIER = com.logseq.logseq;
                                 PRODUCT_NAME = "$(TARGET_NAME)";
@@ -661,7 +709,7 @@
                                         "$(inherited)",
                                         "@executable_path/Frameworks",
                                 );
-                                MARKETING_VERSION = 0.11.0;
+                                MARKETING_VERSION = 2.0.1;
                                 PRODUCT_BUNDLE_IDENTIFIER = com.logseq.logseq;
                                 PRODUCT_NAME = "$(TARGET_NAME)";
                                 PROVISIONING_PROFILE_SPECIFIER = "";
@@ -692,7 +740,7 @@
                                         "@executable_path/Frameworks",
                                         "@executable_path/../../Frameworks",
                                 );
-                                MARKETING_VERSION = 0.11.0;
+                                MARKETING_VERSION = 2.0.1;
                                 MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
                                 MTL_FAST_MATH = YES;
                                 PRODUCT_BUNDLE_IDENTIFIER = com.logseq.logseq.ShareViewController;
@@ -725,7 +773,7 @@
                                         "@executable_path/Frameworks",
                                         "@executable_path/../../Frameworks",
                                 );
-                                MARKETING_VERSION = 0.11.0;
+                                MARKETING_VERSION = 2.0.1;
                                 MTL_FAST_MATH = YES;
                                 PRODUCT_BUNDLE_IDENTIFIER = com.logseq.logseq.ShareViewController;
                                 PRODUCT_NAME = "$(TARGET_NAME)";
@@ -763,7 +811,7 @@
                                         "@executable_path/../../Frameworks",
                                 );
                                 LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-                                MARKETING_VERSION = 1.0;
+                                MARKETING_VERSION = 2.0.1;
                                 MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
                                 MTL_FAST_MATH = YES;
                                 PRODUCT_BUNDLE_IDENTIFIER = com.logseq.logseq.shortcuts;
@@ -805,7 +853,7 @@
                                         "@executable_path/../../Frameworks",
                                 );
                                 LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-                                MARKETING_VERSION = 1.0;
+                                MARKETING_VERSION = 2.0.1;
                                 MTL_FAST_MATH = YES;
                                 PRODUCT_BUNDLE_IDENTIFIER = com.logseq.logseq.shortcuts;
                                 PRODUCT_NAME = "$(TARGET_NAME)";

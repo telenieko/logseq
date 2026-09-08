@@ -1,7 +1,7 @@
 (ns frontend.handler.plugin-config
   "This system component encapsulates the global plugin.edn and depends on the
   global-config component. This component is only enabled? if both the
-  global-config and plugin components are enabled. plugin.edn is automatically updated
+  global-config and plugin components are enabled. plugins.edn is automatically updated
 when a plugin is installed, updated or removed"
   (:require [borkdude.rewrite-edn :as rewrite]
             [cljs-bean.core :as bean]
@@ -9,6 +9,7 @@ when a plugin is installed, updated or removed"
             [clojure.pprint :as pprint]
             [clojure.set :as set]
             [frontend.fs :as fs]
+            [frontend.context.i18n :refer [t]]
             [frontend.handler.common.plugin :as plugin-common-handler]
             [frontend.handler.global-config :as global-config-handler]
             [frontend.handler.notification :as notification]
@@ -31,31 +32,29 @@ when a plugin is installed, updated or removed"
   (->> plugin-config-schema/Plugin rest (mapv first)))
 
 (defn add-or-update-plugin
-  "Adds or updates a plugin from plugin.edn"
+  "Adds or updates a plugin from plugins.edn"
   [{:keys [id] :as plugin}]
   (p/let [content (fs/read-file nil (plugin-config-path))
           updated-content (-> content
                               rewrite/parse-string
                               (rewrite/assoc (keyword id) (select-keys plugin common-plugin-keys))
                               str)]
-         ;; fs protocols require repo and dir when they aren't necessary. For this component,
-         ;; neither is needed so these are blank and nil respectively
-    (fs/write-plain-text-file! "" nil (plugin-config-path) updated-content {:skip-compare? true})))
+    (fs/write-file! (plugin-config-path) updated-content)))
 
 (defn remove-plugin
-  "Removes a plugin from plugin.edn"
+  "Removes a plugin from plugins.edn"
   [plugin-id]
-  (p/let [content (fs/read-file "" (plugin-config-path))
+  (p/let [content (fs/read-file nil (plugin-config-path))
           updated-content (-> content rewrite/parse-string (rewrite/dissoc (keyword plugin-id)) str)]
-    (fs/write-plain-text-file! "" nil (plugin-config-path) updated-content {:skip-compare? true})))
+    (fs/write-file! (plugin-config-path) updated-content)))
 
 (defn- create-plugin-config-file-if-not-exists
   []
-  (let [content (-> (:plugin/installed-plugins @state/state)
+  (let [content (-> (:plugin/installed-plugins (state/get-state))
                     (update-vals #(select-keys % common-plugin-keys))
                     pprint/pprint
                     with-out-str)]
-    (fs/create-if-not-exists "" nil (plugin-config-path) content)))
+    (fs/create-if-not-exists (state/get-current-repo) nil (plugin-config-path) content)))
 
 (defn- determine-plugins-to-change
   "Given installed plugins state and plugins from plugins.edn,
@@ -86,17 +85,16 @@ returns map of plugins to install and uninstall"
            edn-plugins (edn/read-string edn-plugins*)]
      (if-let [errors (->> edn-plugins (m/explain plugin-config-schema/Plugins-edn) me/humanize)]
        (do
-         (notification/show! "Invalid plugins.edn provided. See javascript console for specific errors"
+         (notification/show! (t :plugin/invalid-plugins-edn)
                              :error)
-         (log/error :plugin-edn-errors errors)
-         (println "Invalid plugins.edn, errors: " errors))
+         (log/error :plugin-edn-errors errors))
        (let [plugins-to-change (determine-plugins-to-change
-                                (:plugin/installed-plugins @state/state)
+                                (:plugin/installed-plugins (state/get-state))
                                 edn-plugins)]
          (state/pub-event! [:go/plugins-from-file plugins-to-change]))))
    (fn [e]
      (if (= :reader-exception (:type (ex-data e)))
-       (notification/show! "Malformed plugins.edn provided. Please check the file has correct edn syntax."
+       (notification/show! (t :plugin/malformed-plugins-edn)
                            :error)
        (log/error :unexpected-error e)))))
 

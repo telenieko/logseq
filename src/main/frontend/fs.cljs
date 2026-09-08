@@ -11,6 +11,7 @@
             [frontend.state :as state]
             [frontend.util :as util]
             [lambdaisland.glogi :as log]
+            [logseq.common.config :as common-config]
             [logseq.common.path :as path]
             [logseq.common.util :as common-util]
             [promesa.core :as p]))
@@ -27,13 +28,8 @@
 (defn get-fs
   [dir & {:keys [repo rpath]}]
   (let [repo (or repo (state/get-current-repo))
-        bfs-local? (and dir
-                        (or (string/starts-with? dir (str "/" config/demo-repo))
-                            (string/starts-with? dir config/demo-repo)))
-        db-assets? (and
-                    (config/db-based-graph? repo)
-                    rpath
-                    (string/starts-with? rpath "assets/"))]
+        db-assets? (and rpath
+                        (string/starts-with? rpath "assets/"))]
     (cond
       (and db-assets? (util/electron?))
       node-backend
@@ -47,15 +43,11 @@
       (string/starts-with? dir "memory://")
       memory-backend
 
-      (and (util/electron?) (not bfs-local?))
+      (util/electron?)
       node-backend
 
       :else
-      nil)))
-
-(defn mkdir!
-  [dir]
-  (protocol/mkdir! (get-fs dir) dir))
+      (throw (ex-info "failed to get fs backend" {:dir dir :repo repo :rpath rpath})))))
 
 (defn mkdir-recur!
   [dir]
@@ -107,8 +99,36 @@
                                                  :error error})
                   ;; Disable this temporarily
                   ;; (js/alert "Current file can't be saved! Please copy its content to your local file system and click the refresh button.")
-                  ))))))
+                  (throw error)))))))
 
+(defn write-file!
+  "A node only version of write-plain-text-file! to avoid using the fs-protocol
+   which has file graph assumptions"
+  [path content]
+  (when (util/electron?)
+    (let [file-fpath (common-util/path-normalize path)]
+      ;; repo is nil because we don't want a backup file written
+      (-> (ipc/ipc "writeFile" nil file-fpath content)
+          (p/catch (fn [error]
+                     (state/pub-event! [:capture-error {:error error
+                                                        :payload {:type :write-file/failed
+                                                                  :user-agent (when js/navigator js/navigator.userAgent)
+                                                                  :content-length (count content)}}])))))))
+
+(defn write-asset-file!
+  [repo file-name data]
+  (let [repo-dir (config/get-repo-dir repo)]
+    (if (util/electron?)
+      (let [assets-dir (path/path-join repo-dir common-config/local-assets-dir)
+            file-path (path/path-join assets-dir file-name)]
+        ;; Use writeFileBytes directly instead of ipc/ipc (write-file!) because
+        ;; binary data like ArrayBuffer can't be transit-serialized
+        (js/window.apis.writeFileBytes file-path data))
+      (let [file-path (path/path-join common-config/local-assets-dir file-name)]
+        (write-plain-text-file! repo repo-dir file-path data {:skip-transact? true
+                                                              :skip-compare? true})))))
+
+;; read-file should return string on all platforms
 (defn read-file
   ([dir path]
    (let [fs (get-fs dir)
@@ -119,20 +139,10 @@
   ([dir path options]
    (protocol/read-file (get-fs dir) dir path options)))
 
-(defn rename!
-  "Rename files, incoming relative path, converted to absolute path"
-  [repo old-path new-path]
-  (let [new-path (common-util/path-normalize new-path)]
-    (cond
-      ; See https://github.com/isomorphic-git/lightning-fs/issues/41
-      (= old-path new-path)
-      (p/resolved nil)
-
-      :else
-      (let [repo-dir (config/get-repo-dir repo)
-            old-fpath (path/path-join repo-dir old-path)
-            new-fpath (path/path-join repo-dir new-path)]
-        (protocol/rename! (get-fs old-fpath) repo old-fpath new-fpath)))))
+(defn read-file-raw
+  [dir path & {:as options}]
+  (let [fs (get-fs dir)]
+    (protocol/read-file-raw fs dir path options)))
 
 (defn stat
   ([fpath]
@@ -149,56 +159,6 @@
      (fn [_stat])
      (fn [_error]
        (mkdir-recur! dir)))))
-
-(defn copy!
-  "Only used by Logseq Sync"
-  [repo old-path new-path]
-  (cond
-    (= old-path new-path)
-    (p/resolved nil)
-
-    :else
-    (let [[old-path new-path]
-          (map #(if (util/electron?)
-                  %
-                  (str (config/get-repo-dir repo) "/" %))
-               [old-path new-path])
-          new-dir (path/dirname new-path)]
-      (p/let [_ (mkdir-if-not-exists new-dir)]
-        (protocol/copy! (get-fs old-path) repo old-path new-path)))))
-
-(defn open-dir
-  [dir]
-  (let [record (get-native-backend)]
-    (p/let [result (protocol/open-dir record dir)]
-      (when result
-        (let [{:keys [path files]} result
-              dir path
-              files (mapv (fn [entry]
-                            (assoc entry :path (path/relative-path dir (:path entry))))
-                          files)]
-          {:path path :files files})))))
-
-(defn get-files
-  "List all files in the directory, recursively.
-
-   Wrap as {:path string :files []}, using relative path"
-  [dir]
-  (let [fs-record (get-native-backend)]
-    (p/let [files (protocol/get-files fs-record dir)]
-      (println ::get-files (count files) "files")
-      (let [files (mapv (fn [entry]
-                          (assoc entry :path (path/relative-path dir (:path entry))))
-                        files)]
-        {:path dir :files files}))))
-
-(defn watch-dir!
-  ([dir] (watch-dir! dir {}))
-  ([dir options] (protocol/watch-dir! (get-fs dir) dir options)))
-
-(defn unwatch-dir!
-  [dir]
-  (protocol/unwatch-dir! (get-fs dir) dir))
 
 ;; FIXME: counterintuitive return value
 (defn create-if-not-exists
@@ -225,14 +185,6 @@
     (fn [stat'] (not (nil? stat')))
     (fn [_e] false))))
 
-(defn asset-href-exists?
-  "href is from `make-asset-url`, so it's most likely a full-path"
-  [href]
-  (p/let [repo-dir (config/get-repo-dir (state/get-current-repo))
-          rpath (path/relative-path repo-dir href)
-          exist? (file-exists? repo-dir rpath)]
-    exist?))
-
 (defn asset-path-normalize
   [path]
   (cond
@@ -241,12 +193,3 @@
 
     :else
     path))
-
-(defn dir-exists?
-  [dir]
-  (file-exists? dir ""))
-
-(defn backup-db-file!
-  [repo path db-content disk-content]
-  (when (util/electron?)
-    (ipc/ipc "backupDbFile" (config/get-local-dir repo) path db-content disk-content)))

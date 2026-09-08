@@ -1,13 +1,13 @@
 (ns frontend.publishing
   "Entry ns for publishing build. Provides frontend for publishing single page
   application"
-  (:require [cljs.reader :as reader]
+  (:require ["react-dom/client" :as rdc]
+            [cljs.reader :as reader]
             [clojure.string :as string]
             [frontend.components.block :as block]
             [frontend.components.editor :as editor]
             [frontend.components.page :as page-component]
             [frontend.components.reference :as reference]
-            [frontend.components.whiteboard :as whiteboard]
             [frontend.context.i18n :as i18n]
             [frontend.handler.command-palette :as command-palette]
             [frontend.handler.events :as events]
@@ -17,12 +17,13 @@
             [frontend.modules.shortcut.core :as shortcut]
             [frontend.page :as page]
             [frontend.persist-db.browser :as db-browser]
+            [frontend.rfx :as rfx]
             [frontend.routes :as routes]
+            [frontend.runtime.globals :as runtime-globals]
             [frontend.state :as state]
             [promesa.core :as p]
             [reitit.frontend :as rf]
-            [reitit.frontend.easy :as rfe]
-            [rum.core :as rum]))
+            [reitit.frontend.easy :as rfe]))
 
 ;; The publishing site should be as thin as possible.
 ;; Both files and git libraries can be removed.
@@ -52,7 +53,7 @@
   []
   ;; Client sets repo name (and graph type) based on what was written in app state
   (when-let [data js/window.logseq_db]
-    (let [repo (-> @state/state :config keys first)]
+    (let [repo (-> (state/get-state) :config keys first)]
       (state/set-current-repo! repo)
       (p/let [_ (repo-handler/restore-and-setup-repo! repo)
               _ (let [db-transit-str (unescape-html data)]
@@ -65,7 +66,7 @@
   []
   (when-let [data js/window.logseq_state]
     (let [data (reader/read-string data)]
-      (swap! state/state merge data))))
+      (state/swap-state! merge data))))
 
 (defn set-router!
   []
@@ -78,22 +79,19 @@
 (defn start []
   (when-let [node (.getElementById js/document "root")]
     (set-router!)
-    (rum/mount (page/current-page) node)))
+    (.render (rdc/createRoot node) (rfx/provider (page/current-page)))))
 
 (defn- register-components-fns!
   []
   (state/set-page-blocks-cp! page-component/page-cp)
   (state/set-component! :block/->hiccup block/->hiccup)
   (state/set-component! :block/linked-references reference/references)
-  (state/set-component! :whiteboard/tldraw-preview whiteboard/tldraw-preview)
-  (state/set-component! :block/single-block block/single-block-cp)
   (state/set-component! :block/container block/block-container)
   (state/set-component! :block/inline-title block/inline-title)
   (state/set-component! :block/breadcrumb block/breadcrumb)
   (state/set-component! :block/blocks-container block/blocks-container)
   (state/set-component! :block/reference block/block-reference)
   (state/set-component! :block/properties-cp block/db-properties-cp)
-  (state/set-component! :block/embed block/block-embed)
   (state/set-component! :block/page-cp block/page-cp)
   (state/set-component! :block/inline-text block/inline-text)
   (state/set-component! :block/asset-cp block/asset-cp)
@@ -104,6 +102,7 @@
   ;; init is called ONCE when the page loads
   ;; this is called in the index.html and must be exported
   ;; so it is available even in :advanced release builds
+  (runtime-globals/install!)
   (register-components-fns!)
   ;; Set :preferred-lang as some components depend on it
   (i18n/start)

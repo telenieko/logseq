@@ -6,8 +6,6 @@
             [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
             [logseq.common.util.date-time :as date-time-util]
-            [logseq.db.common.entity-plus :as entity-plus]
-            [logseq.db.common.entity-util :as common-entity-util]
             [logseq.db.common.order :as db-order]
             [logseq.db.frontend.class :as db-class]
             [logseq.db.frontend.db :as db-db]
@@ -29,7 +27,7 @@
   (->> (d/datoms db :avet :block/title page-name)
        (filter (fn [d]
                  (let [e (d/entity db (:e d))]
-                   (common-entity-util/page? e))))
+                   (entity-util/page? e))))
        (map :e)
        sort
        first))
@@ -46,6 +44,66 @@
     eid
     (:alias rules/rules))
    distinct))
+
+(defn- datom-v
+  [db eid attr]
+  (some-> (first (d/datoms db :eavt eid attr)) :v))
+
+(defn- datom-vs
+  [db eid attr]
+  (map :v (d/datoms db :eavt eid attr)))
+
+(defn- get-block-alias-ids
+  [db eid]
+  (distinct
+   (concat
+    (datom-vs db eid :block/alias)
+    (map :e (d/datoms db :avet :block/alias eid)))))
+
+(defn- hidden-eid-pred
+  [db]
+  (let [*cache (volatile! {})]
+    (letfn [(hidden? [eid seen]
+              (cond
+                (nil? eid)
+                false
+
+                (contains? @*cache eid)
+                (get @*cache eid)
+
+                (contains? seen eid)
+                false
+
+                :else
+                (let [result (boolean
+                              (or (datom-v db eid :logseq.property/hide?)
+                                  (datom-v db eid :logseq.property/deleted-at)
+                                  (hidden? (datom-v db eid :block/parent) (conj seen eid))))]
+                  (vswap! *cache assoc eid result)
+                  result)))]
+      (fn [eid]
+        (hidden? eid #{})))))
+
+(defn- hidden-ref-id-pred
+  ([db id]
+   (hidden-ref-id-pred db id (hidden-eid-pred db)))
+  ([db id hidden-eid?]
+   (let [entity (d/entity db id)
+         entity-ident (:db/ident entity)
+         class-ids (when (entity-util/class? entity)
+                     (let [children (db-class/get-structured-children db id)]
+                       (set (conj children id))))]
+     (fn [ref-eid]
+       (or
+        (= ref-eid id)
+        (= id (datom-v db ref-eid :block/page))
+        (= id (datom-v db ref-eid :logseq.property/view-for))
+        (hidden-eid? (datom-v db ref-eid :block/page))
+        (hidden-eid? ref-eid)
+        (and class-ids
+             (some class-ids (datom-vs db ref-eid :block/tags)))
+        (and entity-ident
+             (seq (d/datoms db :eavt ref-eid entity-ident))))))))
 
 (comment
   (defn- get-built-in-files
@@ -86,10 +144,10 @@
       block)))
 
 (defn get-block-children-ids
-  "Returns children UUIDs, notice the result doesn't include property value children ids."
-  [db block-uuid & {:keys [include-collapsed-children?]
-                    :or {include-collapsed-children? true}}]
-  (when-let [eid (:db/id (d/entity db [:block/uuid block-uuid]))]
+  "Returns children ids, notice the result doesn't include property value children ids."
+  [db block-eid & {:keys [include-collapsed-children?]
+                   :or {include-collapsed-children? true}}]
+  (when-let [eid (:db/id (d/entity db block-eid))]
     (let [seen (volatile! #{})]
       (loop [eids-to-expand [eid]]
         (when (seq eids-to-expand)
@@ -98,33 +156,32 @@
                           (let [e (d/entity db eid)]
                             (when (or include-collapsed-children?
                                       (not (:block/collapsed? e))
-                                      (common-entity-util/page? e))
+                                      (entity-util/page? e))
                               (:block/_parent e)))) eids-to-expand)
-                uuids-to-add (keep :block/uuid children)]
-            (vswap! seen (partial apply conj) uuids-to-add)
+                ids-to-add (keep :db/id children)]
+            (vswap! seen (partial apply conj) ids-to-add)
             (recur (keep :db/id children)))))
       @seen)))
 
 (defn get-block-children
   "Including nested children, notice the result doesn't include property values."
-  {:arglists '([db block-uuid & {:keys [include-collapsed-children?]}])}
-  [db block-uuid & {:as opts}]
-  (let [ids (get-block-children-ids db block-uuid opts)]
+  {:arglists '([db eid & {:keys [include-collapsed-children?]}])}
+  [db eid & {:as opts}]
+  (let [ids (get-block-children-ids db eid opts)]
     (when (seq ids)
-      (map (fn [id] (d/entity db [:block/uuid id])) ids))))
+      (map (fn [id] (d/entity db id)) ids))))
 
 (defn get-block-full-children-ids
   "Including nested, collapsed and property value children."
-  {:arglists '([db block-uuid])}
-  [db block-uuid]
+  {:arglists '([db block-eid])}
+  [db block-eid]
   (d/q
    '[:find [?c ...]
      :in $ ?id %
      :where
-     [?p :block/uuid ?id]
-     (parent ?p ?c)]
+     (parent ?id ?c)]
    db
-   block-uuid
+   block-eid
    (:parent rules/rules)))
 
 (defn- with-raw-title
@@ -163,40 +220,55 @@
         (with-raw-title entity)
         (assoc :db/id (:db/id entity)))))
 
-(defn hidden-ref?
-  "Whether ref-block (for block with the `id`) should be hidden."
-  [db ref-block id]
-  (let [db-based? (entity-plus/db-based-graph? db)]
-    (if db-based?
-      (let [entity (d/entity db id)]
-        (or
-         (= (:db/id ref-block) id)
-         (= id (:db/id (:block/page ref-block)))
-         (= id (:db/id (:logseq.property/view-for ref-block)))
-         (entity-util/hidden? (:block/page ref-block))
-         (entity-util/hidden? ref-block)
-         (and (entity-util/class? entity)
-              (let [children (db-class/get-structured-children db id)
-                    class-ids (set (conj children id))]
-                (some class-ids (map :db/id (:block/tags ref-block)))))
-         (some? (get ref-block (:db/ident entity)))))
+(defn hidden-ref-pred
+  "Build a predicate that determines if a ref block should be hidden for `id`.
+   Reuses cached class/tag context so callers can check many refs efficiently."
+  [db id]
+  (let [entity (d/entity db id)
+        entity-ident (:db/ident entity)
+        class-ids (when (entity-util/class? entity)
+                    (let [children (db-class/get-structured-children db id)]
+                      (set (conj children id))))]
+    (fn [ref-block]
       (or
        (= (:db/id ref-block) id)
-       (= id (:db/id (:block/page ref-block)))))))
+       (= id (:db/id (:block/page ref-block)))
+       (= id (:db/id (:logseq.property/view-for ref-block)))
+       (entity-util/hidden? (:block/page ref-block))
+       (entity-util/hidden? ref-block)
+       (and class-ids
+            (some class-ids (map :db/id (:block/tags ref-block))))
+       (and entity-ident
+            (some? (get ref-block entity-ident)))))))
 
 (defn get-block-refs
   [db id]
   (let [with-alias (->> (get-block-alias db id)
                         (cons id)
-                        distinct)]
+                        distinct)
+        hidden-ref?* (hidden-ref-pred db id)]
     (some->> with-alias
              (map #(d/entity db %))
              (mapcat :block/_refs)
-             (remove (fn [ref-block] (hidden-ref? db ref-block id))))))
+             (remove hidden-ref?*))))
 
 (defn get-block-refs-count
   [db id]
-  (count (get-block-refs db id)))
+  (let [with-alias (->> (get-block-alias-ids db id)
+                        (cons id)
+                        distinct)
+        hidden-ref?* (hidden-ref-id-pred db id)]
+    (reduce
+     (fn [total alias-id]
+       (+ total
+          (reduce (fn [n datom]
+                    (if (hidden-ref?* (:e datom))
+                      n
+                      (inc n)))
+                  0
+                  (d/datoms db :avet :block/refs alias-id))))
+     0
+     with-alias)))
 
 (defn ^:large-vars/cleanup-todo get-block-and-children
   [db id-or-page-name {:keys [children? properties include-collapsed-children?]
@@ -218,7 +290,7 @@
       ;; (prn :debug :get-block (:db/id block) (:block/title block) :children? children?
       ;;      :include-collapsed-children? include-collapsed-children?)
       (let [children (when children?
-                       (let [children-blocks (get-block-children db (:block/uuid block) {:include-collapsed-children? include-collapsed-children?})
+                       (let [children-blocks (get-block-children db (:db/id block) {:include-collapsed-children? include-collapsed-children?})
                              large-page? (>= (count children-blocks) 100)
                              children (let [children' (if large-page?
                                                         (:block/_parent block)
@@ -249,7 +321,8 @@
                                                       (and children? (empty? properties))
                                                       :children
                                                       :else
-                                                      :self)))]
+                                                      :self)
+                            :block.temp/has-children? (some? (first (d/datoms db :avet :block/parent (:db/id block))))))]
         (cond->
          {:block block'}
           children?
@@ -264,8 +337,11 @@
          (keep (fn [d]
                  (when (<= (:v d) today)
                    (let [e (d/entity db (:e d))]
-                     (when (and (common-entity-util/journal? e) (:db/id e))
-                       e))))))))
+                     (when (and (entity-util/journal? e)
+                                (:db/id e)
+                                (not (entity-util/recycled? e)))
+                       e)))))
+         (common-util/distinct-by :db/id))))
 
 (defn- get-structured-datoms
   [db]
@@ -276,15 +352,12 @@
           (d/datoms db :avet :block/closed-value-property))
          (mapcat (fn [d]
                    (let [block-datoms (d/datoms db :eavt (:e d))
-                         properties-of-property-datoms
+                         property-description-datoms
                          (when (= (:v d) class-property-id)
-                           (concat
-                            (when-let [desc (:logseq.property/description (d/entity db (:e d)))]
-                              (d/datoms db :eavt (:db/id desc)))
-                            (when-let [desc (:logseq.property/default-value (d/entity db (:e d)))]
-                              (d/datoms db :eavt (:db/id desc)))))]
-                     (if (seq properties-of-property-datoms)
-                       (concat block-datoms properties-of-property-datoms)
+                           (when-let [desc (:logseq.property/description (d/entity db (:e d)))]
+                             (d/datoms db :eavt (:db/id desc))))]
+                     (if (seq property-description-datoms)
+                       (concat block-datoms property-description-datoms)
                        block-datoms)))))))
 
 (defn- get-favorites
@@ -302,16 +375,6 @@
                         (d/datoms db :eavt (:db/id child)))
                       children)))))
 
-(defn- get-views-data
-  [db]
-  (let [page-id (get-first-page-by-name db common-config/views-page-name)
-        children (when page-id (:block/_parent (d/entity db page-id)))]
-    (when (seq children)
-      (into
-       (mapcat (fn [b] (d/datoms db :eavt (:db/id b)))
-               children)
-       (d/datoms db :eavt page-id)))))
-
 (defn get-recent-updated-pages
   [db]
   (when db
@@ -319,28 +382,35 @@
      (d/datoms db :avet :block/updated-at)
      rseq
      (keep (fn [datom]
-             (let [e (d/entity db (:e datom))]
-               (when (and (common-entity-util/page? e)
-                          (not (entity-util/hidden? e))
-                          (not (string/blank? (:block/title e))))
-                 e))))
-     (take 30))))
+             (let [page (first (d/datoms db :eavt (:e datom) :block/page))]
+               (when-not (or page
+                             (let [title (:v (first (d/datoms db :eavt (:e datom) :block/title)))]
+                               (string/blank? title)))
+                 (let [e (d/entity db (:e datom))]
+                   (when (and
+                          (entity-util/page? e)
+                          (not (entity-util/hidden? e)))
+                     e))))))
+     (take 15))))
 
 (defn- get-all-user-datoms
   [db]
   (when (d/entity db :logseq.property.user/email)
-    (mapcat
-     (fn [d]
-       (d/datoms db :eavt (:e d)))
-     (d/datoms db :avet :logseq.property.user/email))))
+    (->> (d/datoms db :avet :logseq.property.user/email)
+         (mapcat
+          (fn [d] (d/datoms db :eavt (:e d)))))))
+
+(defn- get-list-style-values
+  [db]
+  (->> (d/datoms db :avet :logseq.property/order-list-type)
+       (map :v)
+       (distinct)
+       (mapcat (fn [v] (d/datoms db :eavt v)))))
 
 (defn get-initial-data
-  "Returns current database schema and initial data.
-   NOTE: This fn is called by DB and file graphs"
+  "Returns current database schema and initial data"
   [db]
-  (let [db-graph? (entity-plus/db-based-graph? db)
-        _ (when db-graph?
-            (reset! db-order/*max-key (db-order/get-max-order db)))
+  (let [_ (reset! db-order/*max-key (db-order/get-max-order db))
         schema (:schema db)
         idents (mapcat (fn [id]
                          (when-let [e (d/entity db id)]
@@ -348,35 +418,37 @@
                        [:logseq.kv/db-type
                         :logseq.kv/schema-version
                         :logseq.kv/graph-uuid
+                        :logseq.kv/local-graph-uuid
+                        :logseq.kv/graph-rtc-e2ee?
+                        :logseq.kv/graph-remote?
                         :logseq.kv/latest-code-lang
                         :logseq.kv/graph-backup-folder
-                        :logseq.kv/graph-text-embedding-model-name
                         :logseq.property/empty-placeholder])
-        favorites (when db-graph? (get-favorites db))
-        views (when db-graph? (get-views-data db))
-        all-files (get-all-files db)
-        structured-datoms (when db-graph?
-                            (get-structured-datoms db))
+        favorites (get-favorites db)
         recent-updated-pages (let [pages (get-recent-updated-pages db)]
                                (mapcat (fn [p] (d/datoms db :eavt (:db/id p))) pages))
+        all-files (get-all-files db)
+        structured-datoms (get-structured-datoms db)
         user-datoms (get-all-user-datoms db)
-        pages-datoms (if db-graph?
-                       (let [contents-id (get-first-page-by-title db "Contents")
-                             capture-page-id (:db/id (db-db/get-built-in-page db common-config/quick-add-page-name))
-                             views-id (get-first-page-by-title db common-config/views-page-name)]
-                         (mapcat #(d/datoms db :eavt %)
-                                 (remove nil? [contents-id capture-page-id views-id])))
-                       ;; load all pages for file graphs
-                       (->> (d/datoms db :avet :block/name)
-                            (mapcat (fn [d] (d/datoms db :eavt (:e d))))))
-        data (distinct
-              (concat idents
-                      structured-datoms
-                      user-datoms
-                      favorites
-                      recent-updated-pages
-                      views
-                      all-files
-                      pages-datoms))]
+        list-style-datoms (get-list-style-values db)
+        pages-datoms (let [contents-id (get-first-page-by-title db "Contents")
+                           capture-page-id (:db/id (db-db/get-built-in-page db common-config/quick-add-page-name))
+                           views-id (get-first-page-by-title db common-config/views-page-name)
+                           recycle-id (get-first-page-by-title db "Recycle")]
+                       (mapcat #(d/datoms db :eavt %)
+                               (remove nil? [contents-id capture-page-id views-id recycle-id])))
+        data (->> (concat idents
+                          structured-datoms
+                          user-datoms
+                          list-style-datoms
+                          favorites
+                          recent-updated-pages
+                          all-files
+                          pages-datoms)
+                  distinct
+                  (remove (fn [d]
+                            (contains? #{:block/created-at :block/updated-at
+                                         :block/tx-id :logseq.property/created-by-ref}
+                                       (:a d)))))]
     {:schema schema
      :initial-data data}))

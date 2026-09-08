@@ -1,4 +1,4 @@
-.property-value-inner:not([data-type="default"]):not([data-type="url"]):not([data-type="number"]):not([data-type="date"]):not([data-type="datetime"]) {
+.property-value-inner:not([data-type="default"]):not([data-type="url"]):not([data-type="number"]):not([data-type="string"]):not([data-type="date"]):not([data-type="datetime"]) {
   @apply cursor-pointer;
   &:hover, .as-scalar-value-wrap:hover {
     @apply bg-gray-02 rounded transition-[background-color] duration-300;
@@ -41,7 +41,31 @@
   min-height: 20px;
 }
 
+.ls-string {
+  @apply cursor-text;
+  min-height: 20px;
+}
+
 .ls-repeat-task-frequency .property-value-inner {
   @apply border rounded pl-2;
   min-width: 3em;
+}
+
+.ls-repeat-type-setting {
+  .property-value-inner {
+    @apply border rounded px-2 py-1 max-w-full min-w-0;
+  }
+
+  .jtrigger, .select-item {
+    @apply max-w-full min-w-0;
+  }
+
+  .select-item {
+    @apply !whitespace-normal break-words leading-snug;
+  }
+}
+
+.ls-properties-area .empty-btn,
+.ls-properties-area .empty-text-btn {
+  @apply !text-base;
 }

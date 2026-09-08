@@ -1,23 +1,24 @@
 (ns frontend.handler.route
   "Provides fns used for routing throughout the app"
   (:require [clojure.string :as string]
+            [electron.ipc :as ipc]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.date :as date]
-            [frontend.db :as db]
-            [frontend.db.model :as model]
+            [frontend.db.async :as db-async]
             [frontend.extensions.pdf.utils :as pdf-utils]
+            [frontend.handler.graph :as graph-handler]
             [frontend.handler.notification :as notification]
-            [frontend.handler.property.util :as pu]
             [frontend.handler.recent :as recent-handler]
             [frontend.handler.search :as search-handler]
             [frontend.handler.ui :as ui-handler]
             [frontend.state :as state]
             [frontend.util :as util]
+            [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
-            [logseq.db :as ldb]
             [logseq.graph-parser.text :as text]
             [logseq.shui.ui :as shui]
+            [promesa.core :as p]
             [reitit.frontend.easy :as rfe]))
 
 (defn redirect!
@@ -27,6 +28,7 @@
   (shui/popup-hide!)
   (let [route-fn (if push rfe/push-state rfe/replace-state)]
     (route-fn to path-params query-params))
+
   ;; force return nil for usage in render phase of React
   nil)
 
@@ -36,6 +38,22 @@
   ([pub-event?]
    (when pub-event? (state/pub-event! [:redirect-to-home]))
    (redirect! {:to :home})))
+
+(defn- history-length
+  []
+  (.-length js/window.history))
+
+(defn- history-go-back!
+  []
+  (.back js/window.history))
+
+(defn redirect-to-previous!
+  "Leave the current history entry by going back to the previous page/block.
+   Replaces the current entry with home when there is no previous history entry."
+  []
+  (if (> (history-length) 1)
+    (history-go-back!)
+    (redirect! {:to :home :push false})))
 
 (defn redirect-to-all-pages!
   []
@@ -49,150 +67,204 @@
   []
   (redirect! {:to :graphs}))
 
-(defn redirect-to-whiteboard-dashboard!
-  []
-  (redirect! {:to :whiteboards}))
-
 ;; Named block links only works on web (and publishing)
 (if util/web-platform?
-  (defn- default-page-route [page-name-or-block-uuid]
-    ;; Only query if in a block context
-    (let [block (when (uuid? page-name-or-block-uuid)
-                  (model/get-block-by-uuid page-name-or-block-uuid))]
-      (if (pu/lookup block :logseq.property/heading)
+  (defn- default-page-route
+    ([page-name-or-block-uuid]
+     (default-page-route page-name-or-block-uuid nil))
+    ([page-name-or-block-uuid route-info]
+     (if (:block-route-name route-info)
         {:to :page-block
-         :path-params {:name (get-in block [:block/page :block/name])
-                       :block-route-name (model/heading-content->route-name (:block/title block))}}
+         :path-params {:name (:block-page-name route-info)
+                       :block-route-name (:block-route-name route-info)}}
         {:to :page
          :path-params {:name (if (string? page-name-or-block-uuid)
                                (util/page-name-sanity-lc page-name-or-block-uuid)
                                (str page-name-or-block-uuid))}})))
 
-  (defn- default-page-route [page-name]
-    {:to :page
-     :path-params {:name (str page-name)}}))
+  (defn- default-page-route
+    ([page-name]
+     (default-page-route page-name nil))
+    ([page-name _route-info]
+     {:to :page
+      :path-params {:name (str page-name)}})))
+
+(defn- current-graph-query-params
+  []
+  (when-let [graph-id (graph-handler/current-graph-id)]
+    {:graph-id graph-id}))
+
+(defn- merge-query-params
+  [route params]
+  (update route :query-params merge params))
+
+(defn- <page-route-info
+  [page-name]
+  (when-let [repo (state/get-current-repo)]
+    (state/<invoke-db-worker :thread-api/get-page-route-info repo page-name)))
 
 (defn redirect-to-page!
   "`page-name` can be a block uuid or name, prefer to use uuid than name when possible"
   ([page-name]
    (redirect-to-page! page-name {}))
-  ([page-name {:keys [anchor push click-from-recent? block-id new-whiteboard? ignore-alias?]
-               :or {click-from-recent? false}
-               :as opts}]
+  ([page-name {:keys [anchor push click-from-recent? block-id ignore-alias?]
+               :or {click-from-recent? false}}]
    (when (or (uuid? page-name)
              (and (string? page-name) (not (string/blank? page-name))))
-     (let [page (db/get-page page-name)
-           whiteboard? (db/whiteboard-page? page)]
+     (p/let [route-info (<page-route-info page-name)]
        (if (and (not config/dev?)
-                (or (and (ldb/hidden? page) (not (ldb/property? page)))
-                    (and (ldb/built-in? page) (ldb/private-built-in-page? page))))
-         (notification/show! "Cannot go to an internal page." :warning)
-         (if-let [source (and (not ignore-alias?) (db/get-alias-source-page (state/get-current-repo) (:db/id page)))]
-           (redirect-to-page! (:block/uuid source) opts)
+                (not= common-config/recycle-page-name (:page-title route-info))
+                (or (and (:hidden? route-info) (not (:property? route-info)))
+                    (and (:built-in? route-info) (:private-built-in? route-info))))
+         (notification/show! (t :nav/cannot-go-to-internal-page) :warning)
+         (if-let [source-uuid (and (not ignore-alias?) (:alias-source-uuid route-info))]
+           (p/let [source-route-info (<page-route-info source-uuid)]
+             (when-let [source-id (:alias-source-id route-info)]
+               (recent-handler/add-page-to-recent! source-id click-from-recent?))
+             (let [m (cond->
+                      (merge-query-params
+                       (default-page-route (str source-uuid) source-route-info)
+                       (current-graph-query-params))
+
+                       block-id
+                       (merge-query-params {:anchor (str "ls-block-" block-id)})
+
+                       anchor
+                       (merge-query-params {:anchor anchor})
+
+                       (boolean? push)
+                       (assoc :push push))]
+               (redirect! m)))
            (do
-           ;; Always skip onboarding when loading an existing whiteboard
-             (when-not new-whiteboard? (state/set-onboarding-whiteboard! true))
-             (when-let [db-id (:db/id page)]
+             (when-let [db-id (:page-id route-info)]
                (recent-handler/add-page-to-recent! db-id click-from-recent?))
-             (if (and whiteboard?  (= (str page-name) (state/get-current-page)) block-id)
-               (state/focus-whiteboard-shape block-id)
-               (let [m (cond->
-                        (default-page-route (str page-name))
+             (let [m (cond->
+                      (merge-query-params
+                       (default-page-route (str page-name) route-info)
+                       (current-graph-query-params))
 
-                         block-id
-                         (assoc :query-params (if whiteboard?
-                                                {:block-id block-id}
-                                                {:anchor (str "ls-block-" block-id)}))
+                       block-id
+                       (merge-query-params {:anchor (str "ls-block-" block-id)})
 
-                         anchor
-                         (assoc :query-params {:anchor anchor})
+                       anchor
+                       (merge-query-params {:anchor anchor})
 
-                         (boolean? push)
-                         (assoc :push push))]
-                 (redirect! m))))))))))
+                       (boolean? push)
+                       (assoc :push push))]
+              (redirect! m)))))))))
 
-(defn get-title
+(defn built-in-page-title
+  [page-name]
+  (case page-name
+    common-config/library-page-name
+    (t :library/title)
+
+    common-config/quick-add-page-name
+    (t :editor.quick-add/title)
+
+    common-config/recycle-page-name
+    (t :storage.recycle/title)
+
+    nil))
+
+(defn- static-title
   [name path-params]
   (case name
     :home
     "Logseq"
-    :whiteboards
-    (t :whiteboards)
     :graphs
-    "Graphs"
+    (t :mobile.tab/graphs)
     :graph
-    (t :graph)
+    (t :nav/graph)
     :all-files
-    (t :all-files)
+    (t :nav/all-files)
     :all-pages
-    (t :all-pages)
+    (t :nav.all-pages/title)
     :all-journals
-    (t :all-journals)
+    (t :nav/all-journals)
     :file
-    (str "File " (:path path-params))
+    (t :file/title (:path path-params))
     :new-page
-    "Create a new page"
-    :page
-    (let [name (:name path-params)
-          page (db/get-page name)
-          page (and (db/page? page) page)
-          block? (util/uuid-string? name)
-          block-title (when (and block? (not page))
-                        (when-let [block (db/entity [:block/uuid (uuid name)])]
-                          (let [content (text/remove-level-spaces (:block/title block)
-                                                                  (get block :block/format :markdown)
-                                                                  (config/get-block-pattern (get block :block/format :markdown)))]
-                            (if (> (count content) 48)
-                              (str (subs content 0 48) "...")
-                              content))))
-          block-name (:block/title page)
-          block-name' (when block-name
-                        (if (common-util/uuid-string? block-name)
-                          "Untitled"
-                          block-name))]
-      (or block-name'
-          block-title
-          "Logseq"))
+    (t :page/create)
     :tag
     (str "#"  (:name path-params))
     :diff
-    "Git diff"
-    :draw
-    "Draw"
+    (t :graph/diff)
     :settings
-    "Settings"
+    (t :nav/settings)
     :import
-    "Import data into Logseq"
+    (t :import/title)
     "Logseq"))
+
+(defn- format-page-route-title
+  [{:keys [page-title block-title]}]
+  (or (when page-title
+        (if (common-util/uuid-string? page-title)
+          (t :ui/untitled)
+          (or (built-in-page-title page-title)
+              page-title)))
+      (when block-title
+        (let [content (text/remove-level-spaces block-title :markdown common-config/block-pattern)]
+          (if (> (count content) 48)
+            (str (subs content 0 48) "...")
+            content)))
+      "Logseq"))
+
+(defn- <page-route-title
+  [route-name]
+  (if-let [repo (state/get-current-repo)]
+    (p/let [title-info (state/<invoke-db-worker :thread-api/get-route-title repo route-name)]
+      (format-page-route-title title-info))
+    "Logseq"))
+
+(defn get-title
+  [name path-params]
+  (if (= :page name)
+    (<page-route-title (:name path-params))
+    (p/resolved (static-title name path-params))))
+
+(defonce ^:private *page-title-update-id (atom 0))
+
+(defn- apply-page-title!
+  [title]
+  (util/set-title! title)
+  (ipc/ipc :set-window-title title))
 
 (defn update-page-title!
   [route]
-  (let [{:keys [data path-params]} route
-        title (get-title (:name data) path-params)
-        hls? (pdf-utils/hls-file? title)]
-    (util/set-title! (if hls? (pdf-utils/fix-local-asset-pagename title) title))))
+  (let [update-id (swap! *page-title-update-id inc)
+        {:keys [data path-params]} route]
+    (p/let [title (get-title (:name data) path-params)
+            hls? (pdf-utils/hls-file? title)
+            title (if hls? (pdf-utils/fix-local-asset-pagename title) title)]
+      (when (= update-id @*page-title-update-id)
+        (apply-page-title! title)
+        ;; Chromium can restore the history-entry title after popstate and
+        ;; overwrite a same-turn document.title write. Re-apply on the next
+        ;; tick so Back/Forward keep the current page title.
+        (js/setTimeout
+         (fn []
+           (when (= update-id @*page-title-update-id)
+             (apply-page-title! title)))
+         0)))))
 
 (defn update-page-label!
   [route]
   (let [{:keys [data]} route]
     (when-let [data-name (:name data)]
-      (set! (. js/document.body.dataset -page) (get-title data-name (:path-params route))))))
-
-(defn update-page-title-and-label!
-  [route]
-  (update-page-title! route)
-  (update-page-label! route))
+      (p/let [title (get-title data-name (:path-params route))]
+        (set! (. js/document.body.dataset -page) title)))))
 
 (defn jump-to-anchor!
   [anchor-text]
   (when anchor-text
     (js/setTimeout #(ui-handler/highlight-element! anchor-text) 200)
-    (when-let [f (:editor/virtualized-scroll-fn @state/state)]
+    (when-let [f (:editor/virtualized-scroll-fn (state/get-state))]
       (f))))
 
 (defn set-route-match!
   [route]
-  (swap! state/state assoc :route-match route)
+  (state/swap-state! assoc :route-match route)
   (update-page-title! route)
   (update-page-label! route)
   (when-let [anchor (get-in route [:query-params :anchor])]
@@ -215,13 +287,14 @@
 
 (defn sidebar-journals!
   []
-  (state/sidebar-add-block!
-   (state/get-current-repo)
-   (:db/id (db/get-page (date/today)))
-   :page))
+  (when-let [repo (state/get-current-repo)]
+    (p/let [page (db-async/<get-journal-page-by-day repo (date/today-journal-day))]
+      (when-let [page-id (:db/id page)]
+        (state/sidebar-add-block! repo page-id :page)))))
 
 (defn go-to-journals!
   []
+  (state/clear-edit!)
   (let [route (if (state/custom-home-page?)
                 :all-journals
                 :home)]

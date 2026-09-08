@@ -1,27 +1,14 @@
-const or = (...args) => {
-  const variableNames = args.filter(x => x.startsWith('--')) 
-  const initialValue = args.filter(x => !x.startsWith('--'))[0]
+const { stripIOSWebFontSourcesPlugin } = require('./scripts/lib/postcss-strip-ios-web-font-sources.cjs')
 
-  return variableNames.reduceRight((memo, current) => {
-    if (memo && current) { 
-      return `var(${current.trim()}, ${memo})` 
-    } else if (current) {
-      return `var(${current.trim()})`
-    } else if (memo) {
-      return memo
-    }
-  }, initialValue)
-}
-
+const mobileCssBuild = process.argv.some((arg) => arg.endsWith('tailwind.mobile.css'))
 
 module.exports = {
-  plugins: {
-    'autoprefixer': {},
-    'postcss-import-ext-glob': {},
-    'postcss-import': {},
-    'postcss-functions': { functions: { or } },
-    'tailwindcss/nesting': 'postcss-nested',
-    tailwindcss: {},
-    ...(process.env.NODE_ENV === 'production' ? { cssnano: {} } : {})
-  }
+  plugins: [
+    require('postcss-import-ext-glob')(),
+    require('postcss-import')(),
+    require('postcss-nested')(),
+    require('@tailwindcss/postcss')({ optimize: false }),
+    ...(mobileCssBuild ? [stripIOSWebFontSourcesPlugin()] : []),
+    ...(process.env.NODE_ENV === 'production' ? [require('cssnano')()] : [])
+  ]
 }

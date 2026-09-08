@@ -1,3 +1,4 @@
+/* TODO: Remove this file */
 body[data-page=repo-add],
 body[data-page=import] {
   .cp__header .add-graph-btn {
@@ -226,7 +227,7 @@ body[data-page=import] {
       }
 
 
-      @screen lg {
+      @media (min-width: 1024px) {
         background-color: unset;
 
         > h1 {
@@ -316,7 +317,7 @@ body[data-page=import] {
       }
     }
 
-    @screen lg {
+    @media (min-width: 1024px) {
       justify-content: center;
       align-items: center;
     }
@@ -591,7 +592,7 @@ html.is-native-iphone-without-notch {
           }
         }
 
-        @screen lg {
+        @media (min-width: 1024px) {
           > article {
             width: 1040px;
             height: 510px;

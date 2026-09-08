@@ -76,23 +76,90 @@ error if it detects an invalid query.
 
 ### Translations
 
-We use [tongue](https://github.com/tonsky/tongue), a simple and effective
-library, for translations. We have a couple bb tasks for working with
-translations under `lang:` e.g. `bb lang:list`. See [the translator
-guide](./contributing-to-translations.md) for usage.
+We use [tongue](https://github.com/tonsky/tongue) for translations.
 
-One useful task for reviewers (us) and contributors alike, is `bb
-lang:validate-translations` which catches [common
-mistakes](./contributing-to-translations.md#fix-mistakes)). When reviewing
-translations here are some things to keep in mind:
+Responsibilities are split across a few files:
 
-* Punctuation and delimiting characters (e.g. `:`, `:`, `?`) should be part of
-  the translatable string. Those characters and their position may vary depending on the language.
-* Translations usually return strings but they can return hiccup vectors with a
-  fn translation. Hiccup vectors are needed when word order matters for a
-  translation and formatting is involved. See [this 3 word Turkish
-  example](https://github.com/logseq/logseq/commit/1d932f07c4a0aad44606da6df03a432fe8421480#r118971415).
-* Translations can be anonymous fns with arguments for interpolating strings. Fns should be simple and only include the following fns: `str`, `when`, `if` and `=`.
+* [docs/contributing-to-translations.md](./contributing-to-translations.md) is
+  for locale contributors.
+* [docs/i18n-key-naming.md](./i18n-key-naming.md) is for naming and reusing
+  keys in `src/resources/dicts/en.edn`.
+* [.i18n-lint.toml](../.i18n-lint.toml) is the source of truth for hardcoded UI
+  text lint scope, translatable helpers/attributes, exclusions, and allowlists.
+
+#### What must be internationalized
+
+Inside the scope defined by `.i18n-lint.toml`, all user-visible UI text must be
+internationalized.
+
+Exceptions:
+
+* Console output does not need translation.
+* Keep out-of-scope developer-only `(Dev)` labels next to the developer
+  UI/command definition; do not add them to translation dictionaries.
+
+If you introduce a new UI helper, alert API, UI namespace, translatable
+attribute, or other shipped UI surface, update `.i18n-lint.toml` so the lint
+continues to cover it.
+
+#### Translation helpers
+
+All translation helpers live in
+`src/main/frontend/context/i18n.cljs`. Do not add parallel ad hoc i18n helpers
+elsewhere.
+
+| Helper | Use for |
+|---|---|
+| `t` | Standard translation with preferred-locale lookup |
+| `tt` | Try multiple keys and return the first existing translation |
+| `t-en` | Force English output, for example when UI text also needs an English console copy |
+| `interpolate-rich-text` / `interpolate-rich-text-node` | Replace placeholders with rich-text or hiccup fragments |
+| `interpolate-sentence` | Keep a full sentence in one key while inserting placeholders and inline links |
+| `replace-newlines-with-br` | Render translated newline characters as `[:br]` nodes |
+| `locale-join-rich-text` / `locale-join-rich-text-node` | Join rich fragments with locale-aware separators |
+| `locale-format-number` / `locale-format-date` / `locale-format-time` | Format dynamic numbers and dates before passing them into translations |
+
+#### Developer workflow
+
+1. Use `.i18n-lint.toml` to decide whether the text is in i18n scope.
+2. Search `src/resources/dicts/en.edn` for an existing key with the same
+   semantic owner and textual role.
+3. If no exact match exists, follow
+   [the key naming guide](./i18n-key-naming.md) and add the English source text
+   to `en.edn`.
+4. Add non-English locale entries only when you are also providing actual
+   translations. When renaming or removing keys, clean up stale locale keys.
+5. Replace the literal with the appropriate helper from
+   `frontend.context.i18n`.
+
+Recommended checks:
+
+```sh
+bb lang:validate-translations
+bb lang:lint-hardcoded --git-changed
+bb lang:format-dicts
+```
+
+`bb lang:format-dicts` is the repo-owned formatter for dictionary key ordering
+and namespace spacing. Run it after editing dict files.
+
+#### Content rules
+
+* Keep each translation as complete as possible. Do not assemble sentences from
+  fragments in the caller.
+* For plain dynamic text, use placeholders like `{1}` and pre-format arguments
+  in the caller before passing them to `t`.
+* Function-valued translations are allowed only when a locale needs real logic
+  or rich-text hiccup output. When functions are necessary, only `str`, `when`,
+  `if`, and `=` are allowed inside the function body.
+* Keep rich text in a single translation entry. Do not split one sentence
+  across multiple keys.
+* Non-English locale files should contain only actual translations. Do not copy
+  English values just to fill gaps; Tongue falls back to `:en`.
+* Preserve emoji/icon glyphs from `en.edn` exactly, and use punctuation natural
+  to each locale.
+* Pluralization is locale-specific. Do not force English singular/plural rules
+  onto other languages.
 
 ### Spell Checker
 
@@ -109,18 +176,6 @@ $ typos -w
 ```
 
 To configure it e.g. for dealing with false positives, see `typos.toml`.
-
-### Separate DB and File Graph Code
-
-There is a growing number of code and features that are only for file or DB graphs. Run this linter to
-ensure that code you add or modify keeps with existing conventions:
-
-```
-$ bb lint:db-and-file-graphs-separate
-✅ All checks passed!
-```
-
-The main convention is that file and db specific files go under directories named `file_based` and `db_based` respectively. To see the full list of file and db specific namespaces and files see the top of [the script](/scripts/src/logseq/tasks/dev/db_and_file_graphs.clj).
 
 ### Separate Worker from Frontend
 
@@ -147,7 +202,7 @@ To run end to end tests, see [clj-e2e tests](/clj-e2e/README.md).
 Our unit tests use the [shadow-cljs test-runner](https://shadow-cljs.github.io/docs/UsersGuide.html#_testing). To run them:
 
 ```bash
-yarn test
+pnpm test
 ```
 
 By convention, a namespace's tests are found at a corresponding namespace
@@ -307,7 +362,7 @@ point out:
 
   ```sh
   # One time setup
-  $ cd scripts && yarn install && cd -
+  $ cd scripts && pnpm install && cd -
 
   # Build a release publishing app
   $ bb dev:publishing /path/to/graph-dir tmp/publish
@@ -334,54 +389,45 @@ docs](https://github.com/logseq/bb-tasks#logseqbb-tasksnbbwatch) for more info.
 These tasks are specific to database graphs. For these tasks there is a one time setup:
 
 ```sh
-  $ cd deps/db && yarn install && cd ../outliner && yarn install && cd ../graph-parser && yarn install && cd ../..
+  $ cd deps/db && pnpm install && cd ../outliner && pnpm install && cd ../graph-parser && pnpm install && cd ../..
 ```
-
-* `dev:validate-db` - Validates a DB graph's datascript schema
-
-  ```sh
-  # One or more graphs can be validated e.g.
-  $ bb dev:validate-db test-db schema
-  Read graph test-db with 1572 datoms, 220 entities and 13 properties
-  Valid!
-  Read graph schema with 26105 datoms, 2320 entities and 3168 properties
-  Valid!
-  ```
-
-* `dev:db-query` - Query a DB graph
+* `dev:db-cli` - Run a CLI command from deps/db using latest deps/db code
+* `dev:query` - Query a DB graph
 
   ```sh
-  $ bb dev:db-query woot '[:find (pull ?b [*]) :where (block-content ?b "Dogma")]'
+  $ bb dev:query woot '[:find (pull ?b [*]) :where (block-content ?b "Dogma")]'
   DB contains 833 datoms
-  [{:block/tx-id 536870923, :block/link #:db{:id 100065}, :block/uuid #uuid "65565c26-f972-4400-bce4-a15df488784d", :block/updated-at 1700158508564, :block/order "a0", :block/refs [#:db{:id 100064}], :block/created-at 1700158502056, :block/format :markdown, :block/tags [#:db{:id 100064}], :block/title "Dogma #[[65565c2a-b1c5-4dc8-a0f0-81b786bc5c6d]]", :db/id 100090, :block/parent #:db{:id 100051}, :block/page #:db{:id 100051}}]
+  [{:block/tx-id 536870923, :block/link #:db{:id 100065}, :block/uuid #uuid "65565c26-f972-4400-bce4-a15df488784d", :block/updated-at 1700158508564, :block/order "a0", :block/refs [#:db{:id 100064}], :block/created-at 1700158502056, :block/tags [#:db{:id 100064}], :block/title "Dogma #[[65565c2a-b1c5-4dc8-a0f0-81b786bc5c6d]]", :db/id 100090, :block/parent #:db{:id 100051}, :block/page #:db{:id 100051}}]
   ```
 
-* `dev:db-transact` - Run a `d/transact!` against the queried results of a DB graph
+* `dev:transact` - Run a `d/transact!` against the queried results of a DB graph
 
   ```sh
   # The second arg is a datascript like with db-query. The third arg is a fn that is applied to each query result to generate transact data
-  $ bb dev:db-transact
+  $ bb dev:transact
   Usage: $0 GRAPH-DIR QUERY TRANSACT-FN
 
   # First use the -n flag to see a dry-run of what would happen
-  $ bb dev:db-transact test-db '[:find ?b :where [?b :block/type "object"]]' '(fn [id] (vector :db/retract id :block/type "object"))' -n
-  Would update 16 blocks with the following tx:
-  [[:db/retract 100137 :block/type "object"] [:db/retract 100035 :block/type "object"] [:db/retract 100128 :block/type "object"] [:db/retract 100049 :block/type "object"] [:db/retract 100028 :block/type "object"] [:db/retract 100146 :block/type "object"] [:db/retract 100144 :block/type "object"] [:db/retract 100047 :block/type "object"] [:db/retract 100145 :block/type "object"] [:db/retract 100046 :block/type "object"] [:db/retract 100045 :block/type "object"] [:db/retract 100063 :block/type "object"] [:db/retract 100036 :block/type "object"] [:db/retract 100044 :block/type "object"] [:db/retract 100129 :block/type "object"] [:db/retract 100030 :block/type "object"]]
+  $ bb dev:transact test-db '[:find ?b :where [?b :block/title "say wut"]]' '(fn [id] (vector :db/add id :block/title "say woot!"))' -n
+  Would update 1 blocks with the following tx:
+  [[:db/add 169 :block/title "say woot!"]]
   With the following blocks updated:
-  ...
+  (#:block{:title "say wut"})
 
   # When the transact looks good, run it without the flag
-  $ bb dev:db-transact test-db '[:find ?b :where [?b :block/type "object"]]' '(fn [id] (vector :db/retract id :block/type "object"))'
-  Updated 16 block(s) for graph test-db!
+  $ bb dev:transact test-db '[:find ?b :where [?b :block/title "say wut"]]' '(fn [id] (vector :db/add id :block/title "say woot!"))'
+  Updated 1 block(s) for graph test-db!
   ```
 
-* `dev:db-create` - Create a DB graph given a `sqlite.build` EDN file
+  Run the dev command `Replace graph with its db.sqlite file` to use the updated graph in the desktop app.
+
+* `dev:create` - Create a DB graph given a `sqlite.build` EDN file
 
   First in Electron, create the name of the graph you want create e.g. `inferred`.
   Then:
 
   ```sh
-  bb dev:db-create inferred deps/db/script/create_graph/inferred.edn
+  bb dev:create inferred deps/db/script/create_graph/inferred.edn
   Generating 11 pages and 0 blocks ...
   Created graph inferred!
   ```
@@ -389,16 +435,16 @@ These tasks are specific to database graphs. For these tasks there is a one time
   Finally, upload this created graph with the dev command: `Replace graph with
   its db.sqlite file`. You'll be switched to the graph and you can use it!
 
-* `dev:db-import` and `dev:db-import-many` - Imports a file graph to DB graph, for one or many graphs
+* `dev:import` and `dev:import-many` - Imports a file graph to DB graph, for one or many graphs
 
   ```sh
   # Import the local test graph with the debug option
-  $ bb dev:db-import deps/graph-parser/test/resources/exporter-test-graph test-file-graph -d
+  $ bb dev:import deps/graph-parser/test/resources/exporter-test-graph test-file-graph -d
   Importing 43 files ...
   ...
 
   # Import and validate multiple file graphs and write them to ./out/
-  $ bb dev:db-import-many /path/to/foo /path/to/bar -d
+  $ bb dev:import-many /path/to/foo /path/to/bar -d
   Importing ./out/foo ...
   Importing 321 files ...
   Valid!
@@ -407,13 +453,13 @@ These tasks are specific to database graphs. For these tasks there is a one time
   Valid!
   ```
 
-* `dev:db-datoms` and `dev:diff-datoms` - Save a db's datoms to file and diff two datom files
+* `dev:datoms` and `dev:diff-datoms` - Save a db's datoms to file and diff two datom files
 
   ```sh
   # Save a current datoms snapshot of a graph
-  $ bb dev:db-datoms woot w2.edn
+  $ bb dev:datoms woot w2.edn
   # After some edits, save another datoms snapshot
-  $ bb dev:db-datoms woot w3.edn
+  $ bb dev:datoms woot w3.edn
 
   # Diff the two datom snapshots
   # This snapshot correctly shows an added block with content "b7" and a property using a closed :default value
@@ -421,15 +467,8 @@ These tasks are specific to database graphs. For these tasks there is a one time
   [[]
   [[162 :block/title "b7" 536871039 true]
     [162 :block/created-at 1703004379103 536871037 true]
-    [162 :block/format :markdown 536871037 true]
     [162 :block/page 149 536871037 true]
     [162 :block/parent 149 536871037 true]
-    [162
-    :block/properties
-    {#uuid "21be4275-bba9-48b8-9351-c9ca27883159"
-      #uuid "6581b09e-8b9c-4dca-a938-c900aedc8275"}
-    536871043
-    true]
     [162 :block/refs 108 536871043 true]
     [162 :block/refs 160 536871043 true]
     [162
@@ -455,16 +494,9 @@ These tasks are specific to database graphs. For these tasks there is a one time
     [nil nil 536871037 536871038]
     [162 :block/title "b7" 536871039 true]
     [162 :block/created-at 1703004379103 536871037 true]
-    [162 :block/format :markdown 536871037 true]
     [162 :block/order "a0" 536871037 true]
     [162 :block/page 149 536871037 true]
     [162 :block/parent 149 536871037 true]
-    [162
-    :block/properties
-    {#uuid "21be4275-bba9-48b8-9351-c9ca27883159"
-      #uuid "6581b09e-8b9c-4dca-a938-c900aedc8275"}
-    536871043
-    true]
     [162 :block/refs 108 536871043 true]
     [162 :block/refs 160 536871043 true]
     [162 :block/tx-id 536871043 536871044 true]
@@ -479,8 +511,9 @@ These tasks are specific to database graphs. For these tasks there is a one time
 ### Dev Commands
 
 In the app, you can enable Dev commands under `Settings > Advanced > Developer
-mode`. Then search for commands starting with `(Dev)`. Commands include
-inspectors for block/page data and AST.
+mode`. Then search for commands labeled with `(Dev)`. Those labels are
+intentionally hardcoded English developer-only labels, not translation keys.
+Commands include inspectors for block/page data and AST.
 
 ### Desktop Developer Tools
 
@@ -500,15 +533,15 @@ include a JS console and HTML inspector.
 
 If dev app launch failed after electron upgrade:
 ```sh
-yarn
-yarn watch
+pnpm install
+pnpm watch
 ```
 In another window:
 ```sh
 cd static
-yarn
+pnpm install
 cd ..
-yarn dev-electron-app
+pnpm dev-electron-app
 ```
 and kill all electron process
-Then a normal start happens via `yarn dev-electron-app`
+Then a normal start happens via `pnpm dev-electron-app`

@@ -1,62 +1,46 @@
 (ns mobile.state
   "Mobile state"
-  (:require [frontend.rum :as r]))
+  (:require [frontend.state :as state]
+            [logseq.shui.hooks :as hooks]
+            [mobile.navigation :as mobile-nav]))
+
+(defonce *search-input (atom ""))
 
 (defonce *tab (atom "home"))
-(defn set-tab! [tab] (reset! *tab tab))
-(defn use-tab [] (r/use-atom *tab))
 
-(defonce *modal-blocks (atom []))
-(defonce *blocks-navigation-history (atom []))
-(defn open-block-modal!
-  [block]
-  (when (:db/id block)
-    (reset! *modal-blocks [block])
-    (when-not (= (:db/id block) (:db/id (last @*blocks-navigation-history)))
-      (swap! *blocks-navigation-history conj block))))
-
-(defn close-block-modal!
-  "Close top block sheet"
-  []
-  (reset! *modal-blocks [])
-  (reset! *blocks-navigation-history []))
-
-(defn pop-navigation-history!
-  []
-  (when (seq @*blocks-navigation-history)
-    (let [stack (swap! *blocks-navigation-history pop)]
-      (when (seq stack)
-        (reset! *modal-blocks [(last stack)])))))
+(defn set-tab! [tab]
+  (let [prev @*tab]
+    ;; When leaving the search tab, clear its stack so reopening starts fresh.
+    ;; Native search UI owns query/result clearing on each platform; doing it here
+    ;; makes the Search UI redraw during the Home tab transition on iOS.
+    (when (and (= prev "search")
+            (not= tab "search"))
+      (mobile-nav/reset-stack-history! "search"))
+    (reset! *tab tab)
+    (mobile-nav/switch-stack! tab)))
+(defn use-tab [] (hooks/use-atom *tab))
 
 (defonce *popup-data (atom nil))
+(defonce *popup-presenting? (atom false))
 (defn set-popup!
   [data]
-  (reset! *popup-data data))
+  (reset! *popup-data data)
+  (when data
+    (state/pub-event! [:mobile/clear-edit])))
 
-(defn close-popup!
-  []
-  (set-popup! nil))
+(defn set-popup-presenting!
+  [presenting?]
+  (reset! *popup-presenting? presenting?))
 
-(defn quick-add-open?
-  []
-  (= :ls-quick-add (get-in @*popup-data [:opts :id])))
+(defonce *flashcards-header (atom nil))
+(defn set-flashcards-header!
+  [data]
+  (reset! *flashcards-header data))
 
-(defonce *left-sidebar-open? (atom false))
-
-(defn open-left-sidebar!
-  []
-  (reset! *left-sidebar-open? true))
-
-(defn close-left-sidebar!
-  []
-  (reset! *left-sidebar-open? false))
-
-(defn left-sidebar-open?
-  []
-  @*left-sidebar-open?)
-
-(defn redirect-to-tab! [name]
-  (set-tab! (str name)))
+(defonce *flashcards-selector (atom nil))
+(defn set-flashcards-selector!
+  [data]
+  (reset! *flashcards-selector data))
 
 (defonce *log (atom []))
 (defn log-append!
@@ -64,3 +48,5 @@
   (swap! *log conj record)
   (when (> (count @*log) 1000)
     (reset! *log (subvec @*log 800))))
+
+(defonce *app-launch-url (atom nil))

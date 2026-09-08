@@ -17,17 +17,6 @@
 
 (def ^:private write-handlers (cljs-bean.transit/writer-handlers))
 (def ^:private read-handlers {})
-
-(def transit-w (transit/writer :json {:handlers write-handlers}))
-(def transit-r (transit/reader :json {:handlers read-handlers}))
-(defn transit-write
-  [data]
-  (transit/write transit-w data))
-
-(defn transit-read
-  [s]
-  (transit/read transit-r s))
-
 (def write-transit-str
   (let [write-handlers* (->> (assoc dt/write-handlers
                                     de/Entity (transit/write-handler (constantly "datascript/Entity")
@@ -137,9 +126,9 @@
           ;; Timestamp is useful as this can occur much later than :logseq.kv/graph-created-at
            (kv :logseq.kv/imported-at (common-util/time-ms))]
           (mapv
-           ;; Don't import some RTC related entities
            (fn [db-ident] [:db/retractEntity db-ident])
-           [:logseq.kv/graph-uuid
-            :logseq.kv/graph-local-tx
-            :logseq.kv/remote-schema-version
-            :logseq.kv/graph-text-embedding-model-name])))
+           [:logseq.kv/graph-uuid       ;rtc related
+            :logseq.kv/graph-local-tx   ;rtc related
+            :logseq.kv/remote-schema-version ;rtc related
+            :logseq.kv/graph-rtc-e2ee?  ;rtc related
+            ])))

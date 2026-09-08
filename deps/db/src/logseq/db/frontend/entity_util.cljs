@@ -33,11 +33,6 @@
   [entity]
   (has-tag? entity :logseq.class/Property))
 
-(defn whiteboard?
-  "Given a page entity or map, check if it is a whiteboard page"
-  [entity]
-  (has-tag? entity :logseq.class/Whiteboard))
-
 (defn closed-value?
   [entity]
   (some? (:block/closed-value-property entity)))
@@ -50,10 +45,9 @@
 (defn page?
   [entity]
   (or (internal-page? entity)
+      (journal? entity)
       (class? entity)
-      (property? entity)
-      (whiteboard? entity)
-      (journal? entity)))
+      (property? entity)))
 
 (defn asset?
   "Given an entity or map, check if it is an asset block"
@@ -63,12 +57,34 @@
 
 (defn hidden?
   [page]
-  (boolean
-   (when page
-     (if (string? page)
-       (string/starts-with? page "$$$")
-       (when (or (map? page) (de/entity? page))
-         (:logseq.property/hide? page))))))
+  (letfn [(hidden-parent? [entity seen]
+            (when (and entity
+                       (:db/id entity)
+                       (not (contains? seen (:db/id entity))))
+              (or (:logseq.property/hide? entity)
+                  (:logseq.property/deleted-at entity)
+                  (hidden-parent? (:block/parent entity) (conj seen (:db/id entity))))))]
+    (boolean
+     (when page
+       (if (string? page)
+         (string/starts-with? page "$$$")
+         (when (or (map? page) (de/entity? page))
+           (or (:logseq.property/hide? page)
+               (:logseq.property/deleted-at page)
+               (hidden-parent? (:block/parent page) #{}))))))))
+
+(defn recycled?
+  [entity]
+  (letfn [(recycled-parent? [parent seen]
+            (when (and parent
+                       (:db/id parent)
+                       (not (contains? seen (:db/id parent))))
+              (or (:logseq.property/deleted-at parent)
+                  (recycled-parent? (:block/parent parent) (conj seen (:db/id parent))))))]
+    (boolean
+     (when (or (map? entity) (de/entity? entity))
+       (or (:logseq.property/deleted-at entity)
+           (recycled-parent? (:block/parent entity) #{}))))))
 
 (defn object?
   [node]
@@ -80,7 +96,6 @@
   (let [ident->type {:logseq.class/Tag :class
                      :logseq.class/Property :property
                      :logseq.class/Journal :journal
-                     :logseq.class/Whiteboard :whiteboard
                      :logseq.class/Page :page}]
     (set (map #(ident->type (:db/ident %)) (:block/tags entity)))))
 
@@ -92,3 +107,9 @@
 (defn get-pages-by-name
   [db page-name]
   (d/datoms db :avet :block/name (common-util/page-name-sanity-lc page-name)))
+
+(defn entity->map
+  "Convert a db Entity to a map"
+  [e]
+  (assert (de/entity? e))
+  (assoc (into {} e) :db/id (:db/id e)))

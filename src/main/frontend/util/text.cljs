@@ -4,24 +4,7 @@
   (:require [clojure.string :as string]
             [frontend.config :as config]
             [frontend.util :as util]
-            [goog.string :as gstring]
-            [logseq.common.path :as path]
-            [logseq.cli.text-util :as cli-text-util]))
-
-(defonce between-re #"\(between ([^\)]+)\)")
-
-(def bilibili-regex #"^((?:https?:)?//)?((?:www).)?((?:bilibili.com))(/(?:video/)?)([\w-]+)(\?p=(\d+))?(\S+)?$")
-(def loom-regex #"^((?:https?:)?//)?((?:www).)?((?:loom.com))(/(?:share/|embed/))([\w-]+)(\S+)?$")
-(def vimeo-regex #"^((?:https?:)?//)?((?:www).)?((?:player.vimeo.com|vimeo.com))(/(?:video/)?)([\w-]+)(\S+)?$")
-(def youtube-regex #"^((?:https?:)?//)?((?:www|m).)?((?:youtube.com|youtu.be|y2u.be|youtube-nocookie.com))(/(?:[\w-]+\?v=|embed/|v/)?)([\w-]+)([\S^\?]+)?$")
-
-(defn get-matched-video
-  [url]
-  (when (not-empty url)
-    (or (re-find youtube-regex url)
-        (re-find loom-regex url)
-        (re-find vimeo-regex url)
-        (re-find bilibili-regex url))))
+            [goog.string :as gstring]))
 
 (defn build-data-value
   [col]
@@ -32,32 +15,6 @@
 (defn media-link?
   [media-formats s]
   (some (fn [fmt] (util/safe-re-find (re-pattern (str "(?i)\\." fmt "(?:\\?([^#]*))?(?:#(.*))?$")) s)) media-formats))
-
-(defn add-timestamp
-  [content key value]
-  (let [new-line (str (string/upper-case key) ": " value)
-        lines (string/split-lines content)
-        new-lines (map (fn [line]
-                         (string/trim
-                          (if (string/starts-with? (string/lower-case line) key)
-                            new-line
-                            line)))
-                       lines)
-        new-lines (if (not= (map string/trim lines) new-lines)
-                    new-lines
-                    (cons (first new-lines) ;; title
-                          (cons
-                           new-line
-                           (rest new-lines))))]
-    (string/join "\n" new-lines)))
-
-(defn remove-timestamp
-  [content key]
-  (let [lines (string/split-lines content)
-        new-lines (filter (fn [line]
-                            (not (string/starts-with? (string/lower-case line) key)))
-                          lines)]
-    (string/join "\n" new-lines)))
 
 (defn get-current-line-by-pos
   [s pos]
@@ -122,7 +79,22 @@
              []
              ks))))
 
-(def cut-by cli-text-util/cut-by)
+(defn cut-by
+  "Cuts `value` around the first `before` and `end` marker pair."
+  [value before end]
+  (let [b-pos (string/index-of value before)
+        b-len (count before)]
+    (if b-pos
+      (let [b-cut (subs value 0 b-pos)
+            m-cut (subs value (+ b-pos b-len))
+            e-len (count end)
+            e-pos (string/index-of m-cut end)]
+        (if e-pos
+          (let [e-cut (subs m-cut (+ e-pos e-len))
+                m-cut (subs m-cut 0 e-pos)]
+            [b-cut m-cut e-cut])
+          [b-cut m-cut nil]))
+      [value nil nil])))
 
 (defn get-graph-name-from-path
   "Get `Dir/GraphName` style name for from repo-url.
@@ -130,14 +102,4 @@
    On iOS, repo-url might be nil"
   [repo-url]
   (when (not-empty repo-url)
-    (if (config/db-based-graph? repo-url)
-      (string/replace-first repo-url config/db-version-prefix "")
-      (let [path (config/get-local-dir repo-url)
-            path (if (path/is-file-url? path)
-                   (path/url-to-path path)
-                   path)
-            parts (->> (string/split path #"/")
-                       (take-last 2))]
-        (if (not= (first parts) "0")
-          (util/string-join-path parts)
-          (last parts))))))
+    (config/db-graph-name repo-url)))

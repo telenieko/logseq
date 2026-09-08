@@ -1,4 +1,5 @@
 import { CapacitorConfig } from '@capacitor/cli'
+import { KeyboardResize } from '@capacitor/keyboard'
 import * as fs from 'fs'
 
 const version = fs.readFileSync('static/package.json', 'utf8').match(/"version": "(.*?)"/)?.at(1) ?? '0.0.0'
@@ -12,6 +13,18 @@ const config: CapacitorConfig = {
     androidScheme: 'http',
   },
   plugins: {
+    SystemBars: {
+      insetsHandling: 'disable',
+    },
+
+    App: {
+      // Logseq routes back presses through MainActivity -> JS (window.LogseqNative.onNativePop).
+      // Disable @capacitor/app's built-in OnBackPressedCallback so it doesn't intercept the
+      // first edge-back gesture by calling webView.goBack() (which causes a flash and swallows
+      // the event before our handler runs). See android/app/.../MainActivity.java.
+      disableBackButtonHandler: true,
+    },
+
     StatusBar: {
       overlaysWebView: true,
       style: 'Light',
@@ -27,7 +40,7 @@ const config: CapacitorConfig = {
     },
 
     Keyboard: {
-      resize: 'none'
+      resize: KeyboardResize.None,
     },
 
     SafeArea: {
@@ -41,11 +54,11 @@ const config: CapacitorConfig = {
     }
   },
   android: {
-    appendUserAgent: `Logseq/${version} (Android)`
+    appendUserAgent: `Logseq/${version} (Android)`,
   },
   ios: {
     scheme: 'Logseq',
-    appendUserAgent: `Logseq/${version} (iOS)`
+    appendUserAgent: `Logseq/${version} (iOS)`,
   }
 }
 

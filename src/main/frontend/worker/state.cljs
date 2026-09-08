@@ -1,31 +1,18 @@
 (ns frontend.worker.state
   "State hub for worker"
-  (:require [logseq.common.config :as common-config]
-            [logseq.common.util :as common-util]))
+  (:require [frontend.worker.platform :as platform]
+            [logseq.common.util :as common-util]
+            [promesa.core :as p]))
 
 (defonce *main-thread (atom nil))
-(defonce *infer-worker (atom nil))
 (defonce *deleted-block-uuid->db-id (atom {}))
 
-(defn- <invoke-main-thread*
-  [qkw direct-pass? args-list]
-  (let [main-thread @*main-thread]
-    (when (nil? main-thread)
-      (prn :<invoke-main-thread-error qkw)
-      (throw (ex-info "main-thread has not been initialized" {})))
-    (apply main-thread qkw direct-pass? args-list)))
-
 (defn <invoke-main-thread
-  "invoke main thread api"
   [qkw & args]
-  (<invoke-main-thread* qkw false args))
-
-(comment
-  (defn <invoke-main-thread-direct-pass
-    "invoke main thread api.
-  But directly pass args to main-thread and result from main-thread as well."
-    [qkw & args]
-    (<invoke-main-thread* qkw true args)))
+  (if-let [main-thread @*main-thread]
+    (apply main-thread qkw args)
+    (p/rejected (ex-info "main thread is not available in db-worker"
+                         {:method qkw}))))
 
 (defonce *state (atom {:db/latest-transact-time {}
                        :worker/context {}
@@ -37,17 +24,30 @@
                        :auth/id-token nil
                        :auth/access-token nil
                        :auth/refresh-token nil
+                       :auth/oauth-token-url nil
+                       :auth/oauth-domain nil
+                       :auth/oauth-client-id nil
 
-                       :rtc/downloading-graph? false
-
+                       :user/info nil
                        ;; thread atoms, these atoms' value are syncing from ui-thread
-                       :thread-atom/online-event (atom nil)}))
+                       :thread-atom/online-event (atom nil)
+                       :thread-atom/search-input-idle-status (atom {})}))
 
-(defonce *rtc-ws-url (atom nil))
+(def ^:private db-sync-config-auth-keys
+  #{:auth-token :oauth-token-url :oauth-domain :oauth-client-id})
+
+(defn non-auth-db-sync-config
+  [config]
+  (apply dissoc (or config {}) db-sync-config-auth-keys))
+
+(defonce *db-sync-config (atom {:ws-url nil}))
+(defonce *db-sync-client (atom nil))
 
 (defonce *sqlite (atom nil))
 ;; repo -> {:db conn :search conn :client-ops conn}
 (defonce *sqlite-conns (atom {}))
+;; repo -> platform vector search index
+(defonce *vector-indexes (atom {}))
 ;; repo -> conn
 (defonce *datascript-conns (atom nil))
 
@@ -64,6 +64,10 @@
    (assert (contains? #{:db :search :client-ops} which-db) which-db)
    (get-in @*sqlite-conns [repo which-db])))
 
+(defn get-vector-index
+  [repo]
+  (get @*vector-indexes repo))
+
 (defn get-datascript-conn
   [repo]
   (get @*datascript-conns repo))
@@ -75,17 +79,6 @@
 (defn get-opfs-pool
   [repo]
   (get @*opfs-pools repo))
-
-(defn tx-idle?
-  [repo & {:keys [diff]
-           :or {diff 1000}}]
-  (when repo
-    (let [last-input-time (get-in @*state [:db/latest-transact-time repo])]
-      (or
-       (nil? last-input-time)
-
-       (let [now (common-util/time-ms)]
-         (>= (- now last-input-time) diff))))))
 
 (defn set-db-latest-tx-time!
   [repo]
@@ -105,10 +98,6 @@
          (fn [c]
            (merge c context))))
 
-(defn get-config
-  [repo]
-  (get-in @*state [:config repo]))
-
 (defn get-current-repo
   []
   (:git/current-repo @*state))
@@ -118,17 +107,32 @@
   (swap! *state (fn [old-state]
                   (merge old-state new-state))))
 
-(defn get-date-formatter
-  [repo]
-  (common-config/get-date-formatter (get-config repo)))
-
-(defn set-rtc-downloading-graph!
-  [value]
-  (swap! *state assoc :rtc/downloading-graph? value))
-
 (defn get-id-token
   []
   (:auth/id-token @*state))
+
+(defn- node-runtime?
+  []
+  (try
+    (= :node (get-in (platform/current) [:env :runtime]))
+    (catch :default _
+      false)))
+
+(defn- node-online?
+  []
+  (try
+    (let [online? (some-> js/globalThis .-navigator .-onLine)]
+      (if (boolean? online?)
+        online?
+        true))
+    (catch :default _
+      true)))
+
+(defn online?
+  []
+  (if (node-runtime?)
+    (node-online?)
+    (not (false? @(:thread-atom/online-event @*state)))))
 
 (comment
   (defn mobile?

@@ -6,6 +6,7 @@
             [logseq.db.frontend.entity-util :as entity-util]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.sqlite.build :as sqlite-build]
+            [logseq.db.sqlite.export :as sqlite-export]
             [logseq.db.test.helper :as db-test]))
 
 (deftest build-tags
@@ -100,9 +101,17 @@
                        {:block/title "block 2"}]}]})
         block (db-test/find-block-by-content @conn "block 1")
         block2 (db-test/find-block-by-content @conn "block 2")
+        page1 (db-test/find-page-by-title @conn "page1")
+        built-in-page (db-test/find-page-by-title @conn "Quick add")
         {:keys [init-tx block-props-tx]}
         (sqlite-build/build-blocks-tx
-         {:pages-and-blocks [{:page (select-keys (:block/page block) [:block/uuid])
+         {:pages-and-blocks [{:page
+                              {:block/uuid (:block/uuid built-in-page)
+                               :build/keep-uuid? true
+                               :build/properties {:logseq.property/description "foo"}
+                               :block/title "Quick add"}
+                              :blocks []}
+                             {:page (select-keys (:block/page block) [:block/uuid])
                               :blocks [(merge {:block/title "imported task" :block/uuid (:block/uuid block)}
                                               {:build/properties {:logseq.property/status :logseq.property/status.todo}
                                                :build/tags [:logseq.class/Task]})]}]
@@ -123,9 +132,18 @@
         _ (d/transact! conn block-props-tx2)
         updated-block2 (d/entity @conn [:block/uuid (:block/uuid block2)])]
 ;;     (cljs.pprint/pprint _tx)
+    (testing "existing page cases"
+      (is (= (:block/updated-at page1)
+             (:block/updated-at (db-test/find-page-by-title @conn "page1")))
+          "Existing page with no property changes didn't get updated")
+      (is (not= (:block/updated-at built-in-page)
+                (:block/updated-at (db-test/find-page-by-title @conn "Quick add")))
+          "Existing page with property changes does get updated"))
+
     (testing "block with built-in properties and tags"
       (is (= []
-             (filter #(or (:db/id %) (:db/ident %))
+             (filter #(and (not= (:block/uuid %) (:block/uuid built-in-page))
+                           (or (:db/id %) (:db/ident %)))
                      (concat init-tx block-props-tx)))
           "Tx doesn't try to create new blocks or modify existing idents")
       (is (= "imported task" (:block/title updated-block)))
@@ -208,6 +226,44 @@
                 (map #(:block/title (d/entity @conn %)))))
         "Property page has correct blocks")))
 
+(deftest build-class-extends-rejects-cycles
+  (testing "self cycle"
+    (is (thrown-with-msg?
+         js/Error
+         #"Cycle detected in :build/class-extends"
+         (sqlite-build/build-blocks-tx
+          {:classes {:user.class/A {:build/class-extends [:user.class/A]}}}))))
+  (testing "deprecated class parent self cycle"
+    (is (thrown-with-msg?
+         js/Error
+         #"Cycle detected in :build/class-extends"
+         (sqlite-build/build-blocks-tx
+          {:classes {:user.class/A {:build/class-parent :user.class/A}}}))))
+  (testing "deprecated class parent takes precedence"
+    (let [txs (sqlite-build/build-blocks-tx
+               {:classes {:user.class/A {:build/class-parent :user.class/B
+                                         :build/class-extends [:user.class/A]}
+                          :user.class/B {}}})
+          class-a (some #(when (= :user.class/A (:db/ident %)) %) (:init-tx txs))
+          class-b (some #(when (= :user.class/B (:db/ident %)) %) (:init-tx txs))]
+      (is (= [(:db/id class-b)]
+             (:logseq.property.class/extends class-a)))))
+  (testing "multi-class cycle"
+    (is (thrown-with-msg?
+         js/Error
+         #"Cycle detected in :build/class-extends"
+         (sqlite-build/build-blocks-tx
+          {:classes {:user.class/A {:build/class-extends [:user.class/B]}
+                     :user.class/B {:build/class-extends [:user.class/C]}
+                     :user.class/C {:build/class-extends [:user.class/A]}}}))))
+  (testing "diamond inheritance without a cycle"
+    (is (map?
+         (sqlite-build/build-blocks-tx
+          {:classes {:user.class/A {}
+                     :user.class/B {:build/class-extends [:user.class/A]}
+                     :user.class/C {:build/class-extends [:user.class/A]}
+                     :user.class/D {:build/class-extends [:user.class/B :user.class/C]}}})))))
+
 (deftest property-value-with-properties-and-tags
   (let [conn (db-test/create-conn-with-blocks
               {:properties {:p1 {:logseq.property/type :default}}
@@ -257,3 +313,30 @@
     (is (entity-util/property? (d/entity @conn :other.property/p1)))
     (is (entity-util/class? (d/entity @conn :user.class/C1)))
     (is (entity-util/class? (d/entity @conn :other.class/C1)))))
+
+(deftest build-preserves-class-property-ordering-for-export
+  (let [class-properties-c1 [:user.property/p2 :user.property/p1 :user.property/p3]
+        class-properties-c2 [:user.property/p4 :user.property/p2 :user.property/p3]
+        another-class-properties-c1 [:user.property/p5]
+        another-class-properties-c2 [:user.property/p6]
+        another-class-properties-c3 [:user.property/p6 :user.property/p5]
+        conn (db-test/create-conn-with-blocks
+              {:properties {:user.property/p1 {:logseq.property/type :default}
+                            :user.property/p2 {:logseq.property/type :default}
+                            :user.property/p3 {:logseq.property/type :default}
+                            :user.property/p4 {:logseq.property/type :default}
+                            :user.property/p5 {:logseq.property/type :default}
+                            :user.property/p6 {:logseq.property/type :default}}
+               :classes {:user.class/C1 {:build/class-properties class-properties-c1}
+                         :user.class/C2 {:build/class-properties class-properties-c2}
+                         :user.class/AnotherC1 {:build/class-properties another-class-properties-c1}
+                         :user.class/AnotherC2 {:build/class-properties another-class-properties-c2}
+                         :user.class/AnotherC3 {:build/class-properties another-class-properties-c3}}})
+        export-map (sqlite-export/build-export @conn {:export-type :graph-ontology})]
+    (is (= class-properties-c1
+           (get-in export-map [:classes :user.class/C1 :build/class-properties])))
+    (is (= class-properties-c2
+           (get-in export-map [:classes :user.class/C2 :build/class-properties])))
+    (is (= another-class-properties-c3
+           (get-in export-map [:classes :user.class/AnotherC3 :build/class-properties]))
+        "Later class-level ordering constraint :p6 before :p5 is preserved")))

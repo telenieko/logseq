@@ -4,10 +4,10 @@
  {logseq/bb-tasks
   #_{:local/root "../../../bb-tasks"}
   {:git/url "https://github.com/logseq/bb-tasks"
-   :git/sha "1d429e223baeade426d30a4ed1c8a110173a2402"}}
+   :git/sha "7cc218286c03f093996539b8195de56a0ec5df6a"}}
 
  :pods
- {clj-kondo/clj-kondo {:version "2024.09.27"}}
+ {clj-kondo/clj-kondo {:version "2026.04.15"}}
 
  :tasks
  {test:load-all-namespaces-with-nbb
@@ -24,14 +24,11 @@
 
   lint:rules
   {:requires ([logseq.bb-tasks.lint.datalog :as datalog]
-              [logseq.db.file-based.rules :as file-rules]
               [logseq.db.frontend.rules :as rules])
    :doc "Lint datalog rules for parsability and unbound variables"
    :task (datalog/lint-rules
           (set
-           (concat (mapcat val (merge file-rules/rules (dissoc rules/rules :self-ref)))
-                   ;; TODO: Update linter to handle false positive on ?str-val for :property
-                   (rules/extract-rules (dissoc file-rules/query-dsl-rules :property))
+           (concat (mapcat val (dissoc rules/rules :self-ref))
                    ;; TODO: Update linter to handle false positive on :task, :priority, :*property* rules
                    (rules/extract-rules (dissoc rules/db-query-dsl-rules
                                                 :task :priority

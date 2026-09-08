@@ -1,7 +1,7 @@
 (ns query
   "A script that queries any db graph from the commandline e.g.
 
-  $ yarn -s nbb-logseq script/query.cljs db-name '[:find (pull ?b [:block/name :block/title]) :where [?b :block/created-at]]'"
+  $ pnpm exec nbb-logseq script/query.cljs db-name '[:find (pull ?b [:block/name :block/title]) :where [?b :block/created-at]]'"
   (:require ["child_process" :as child-process]
             [babashka.cli :as cli]
             [clojure.edn :as edn]
@@ -39,9 +39,7 @@
         results (if (:entity options)
                   (map #(when-let [ent (d/entity @conn
                                                  (if (string? %) (edn/read-string %) %))]
-                          (cond-> (into {:db/id (:db/id ent)} ent)
-                            (seq (:block/properties ent))
-                            (update :block/properties (fn [props] (map (fn [m] (into {} m)) props)))))
+                          (into {:db/id (:db/id ent)} ent))
                        (:entity options))
                   ;; assumes no :in are in queries
                   (let [query (into (edn/read-string (first args'')) [:in '$ '%])

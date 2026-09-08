@@ -1,117 +1,312 @@
 (ns frontend.worker.handler.page
   "Page operations"
-  (:require [datascript.core :as d]
-            [frontend.worker.handler.page.db-based.page :as db-worker-page]
-            [frontend.worker.handler.page.file-based.page :as file-worker-page]
-            [logseq.common.config :as common-config]
+  (:require [clojure.string :as string]
+            [datascript.core :as d]
+            [frontend.common.thread-api :refer [def-thread-api]]
+            [frontend.worker.handler.block :as block-handler]
+            [frontend.worker.plain-value :as worker-plain]
+            [frontend.worker.state :as worker-state]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
             [logseq.db.frontend.content :as db-content]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.graph-parser.block :as gp-block]
-            [logseq.graph-parser.db :as gp-db]))
-
-(defn rtc-create-page!
-  [conn config title {:keys [uuid old-db-id]}]
-  (assert (uuid? uuid) (str "rtc-create-page! `uuid` is not a uuid " uuid))
-  (let [date-formatter    (common-config/get-date-formatter config)
-        title (db-worker-page/sanitize-title title)
-        page-name (common-util/page-name-sanity-lc title)
-        page              (cond-> (gp-block/page-name->map title @conn true date-formatter
-                                                           {:page-uuid uuid
-                                                            :skip-existing-page-check? true})
-                            old-db-id
-                            (assoc :db/id old-db-id))
-        result            (ldb/transact! conn [page] {:persist-op? false
-                                                      :outliner-op :create-page
-                                                      :rtc-op? true})]
-    [result page-name (:block/uuid page)]))
+            [logseq.db.frontend.entity-util :as entity-util]
+            [logseq.outliner.page :as outliner-page]
+            [logseq.outliner.tree :as otree]))
 
 (defn create!
-  "Create page. Has the following options:
+  "Creates a page through the outliner page service.
 
-   * :uuid                     - when set, use this uuid instead of generating a new one.
-   * :class?                   - when true, adds a :block/tags ':logseq.class/Tag'
-   * :whiteboard?              - when true, adds a :block/tags ':logseq.class/Whiteboard'
-   * :tags                     - tag uuids that are added to :block/tags
-   * :persist-op?              - when true, add an update-page op
-   * :properties               - properties to add to the page
-  TODO: Add other options"
-  [repo conn config title & {:as options}]
-  (if (ldb/db-based-graph? @conn)
-    (db-worker-page/create! conn title options)
-    (file-worker-page/create! repo conn config title options)))
+   Supported options:
 
-(defn db-refs->page
-  "Replace [[page name]] with page name"
-  [repo page-entity]
-  (when (sqlite-util/db-based-graph? repo)
-    (let [refs (:block/_refs page-entity)
-          id-ref->page #(db-content/content-id-ref->page % [page-entity])]
-      (when (seq refs)
-        (let [tx-data (mapcat (fn [{:block/keys [raw-title] :as ref}]
-                                ;; block content
-                                (let [content' (id-ref->page raw-title)
-                                      content-tx (when (not= raw-title content')
-                                                   {:db/id (:db/id ref)
-                                                    :block/title content'})
-                                      tx content-tx]
-                                  (concat
-                                   [[:db/retract (:db/id ref) :block/refs (:db/id page-entity)]]
-                                   (when tx [tx])))) refs)]
-          tx-data)))))
+   * :uuid                    - when set, use this uuid instead of generating a new one; ignored
+                                when :journal? or :today-journal? uses a deterministic journal
+                                uuid from :block/journal-day.
+   * :class?                  - create the page as a Tag class page.
+   * :journal?                - create the page as a Journal page.
+   * :today-journal?          - mark the create-page tx as today's journal creation.
+   * :tags                    - tag uuids or tag entities added to :block/tags.
+   * :properties              - properties to add to the page.
+   * :split-namespace?        - create namespace parent pages for non-journal slash pages.
+   * :class-ident-namespace   - namespace used when creating a class ident.
+   * :persist-op?             - when true, persist the create-page outliner op."
+  [conn title & {:as options}]
+  (outliner-page/create! conn title options))
 
 (defn delete!
-  "Deletes a page. Returns true if able to delete page. If unable to delete,
-  calls error-handler fn and returns false"
-  [repo conn page-uuid & {:keys [persist-op? rename? error-handler]
-                          :or {persist-op? true
-                               error-handler (fn [{:keys [msg]}] (js/console.error msg))}}]
-  (assert (uuid? page-uuid) (str "frontend.worker.handler.page/delete! srong page-uuid: " (if page-uuid page-uuid "nil")))
-  (when (and repo page-uuid)
-    (when-let [page (d/entity @conn [:block/uuid page-uuid])]
-      (let [page-name (:block/name page)
-            blocks (:block/_page page)
-            truncate-blocks-tx-data (mapv
-                                     (fn [block]
-                                       [:db.fn/retractEntity [:block/uuid (:block/uuid block)]])
-                                     blocks)
-            db-based? (sqlite-util/db-based-graph? repo)]
-        ;; TODO: maybe we should add $$$favorites to built-in pages?
-        (if (or (ldb/built-in? page) (ldb/hidden? page))
-          (do
-            (error-handler {:msg "Built-in page cannot be deleted"})
-            false)
-          (let [db @conn
-                file (when-not db-based? (gp-db/get-page-file db page-name))
-                file-path (:file/path file)
-                delete-file-tx (when file
-                                 [[:db.fn/retractEntity [:file/path file-path]]])
-                delete-property-tx (when (ldb/property? page)
-                                     (concat
-                                      (let [datoms (d/datoms @conn :avet (:db/ident page))]
-                                        (map (fn [d] [:db/retract (:e d) (:a d)]) datoms))
-                                      (map (fn [d] [:db/retractEntity (:e d)])
-                                           (d/datoms @conn :avet :logseq.property.history/property (:db/ident page)))))
-                delete-page-tx (concat (db-refs->page repo page)
-                                       delete-property-tx
-                                       [[:db.fn/retractEntity (:db/id page)]])
-                restore-class-parent-tx (when db-based?
-                                          (->> (filter ldb/class? (:logseq.property.class/_extends page))
-                                               (map (fn [p]
-                                                      {:db/id (:db/id p)
-                                                       :logseq.property.class/extends :logseq.class/Root}))))
-                tx-data (concat truncate-blocks-tx-data
-                                restore-class-parent-tx
-                                delete-page-tx
-                                delete-file-tx)]
+  "Deletes a page through the outliner page service.
 
-            (ldb/transact! conn tx-data
-                           (cond-> {:outliner-op :delete-page
-                                    :deleted-page (str (:block/uuid page))
-                                    :persist-op? persist-op?}
-                             rename?
-                             (assoc :real-outliner-op :rename-page)
-                             file-path
-                             (assoc :file-path file-path)))
-            true))))))
+   Returns true when the page can be deleted. If deletion is rejected, calls
+   :error-handler and returns false.
+
+   Supported options:
+
+   * :persist-op?      - when true, persist the delete-page outliner op.
+   * :rename?          - mark the tx as part of a rename flow.
+   * :error-handler    - callback invoked with {:msg string} on rejection.
+   * :deleted-by-uuid  - user uuid recorded in the delete op metadata.
+   * :now-ms           - timestamp recorded in the delete op metadata."
+  [conn page-uuid & {:as options}]
+  (outliner-page/delete! conn page-uuid options))
+
+(defn- page-route-info
+  [db page-id-name-or-uuid]
+  (when-let [page (ldb/get-page db page-id-name-or-uuid)]
+    (let [alias-source (ldb/get-alias-source-page db (:db/id page))]
+      (cond-> {:page-id (:db/id page)
+               :page-uuid (:block/uuid page)
+               :page-title (:block/title page)
+               :hidden? (boolean (ldb/hidden? page))
+               :property? (boolean (ldb/property? page))
+               :built-in? (boolean (ldb/built-in? page))
+               :private-built-in? (boolean (and (ldb/built-in? page)
+                                                (ldb/private-built-in-page? page)))}
+        (:logseq.property/heading page)
+        (assoc :block-page-name (get-in page [:block/page :block/name])
+               :block-route-name (some->> (:block/title page)
+                                           (re-find #"^#{0,}\s*(.*)(?:\n|$)")
+                                           second
+                                           string/lower-case))
+
+        (:block/uuid alias-source)
+        (assoc :alias-source-id (:db/id alias-source)
+               :alias-source-uuid (:block/uuid alias-source))))))
+
+(def-thread-api :thread-api/get-page-route-info
+  [repo page-id-name-or-uuid]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (page-route-info @conn page-id-name-or-uuid)))
+
+(defn- heading-content->route-name
+  [block-content]
+  (some->> block-content
+           (re-find #"^#{0,}\s*(.*)(?:\n|$)")
+           second
+           string/lower-case))
+
+(defn- heading-route-candidates
+  [db page-id]
+  (mapv #(d/entity db %)
+        (d/q '[:find [?block ...]
+               :in $ ?page-id
+               :where
+               [?block :block/page ?page-id]
+               [?block :logseq.property/heading]
+               [?block :block/title]]
+             db
+             page-id)))
+
+(defn- heading-route-name
+  [block]
+  (let [ref-tags (distinct (concat (:block/tags block) (:block/refs block)))]
+    (-> (:block/title block)
+        (db-content/id-ref->title-ref ref-tags)
+        (db-content/content-id-ref->page ref-tags)
+        heading-content->route-name)))
+
+(defn block-route-resolution
+  "Resolve a named heading route together with its page and candidate headings."
+  [db page-id-name-or-uuid route-name]
+  (when-let [page (ldb/get-page db page-id-name-or-uuid)]
+    (let [candidates (heading-route-candidates db (:db/id page))
+          normalized-route-name (string/lower-case route-name)]
+      {:page page
+       :candidates candidates
+       :block (some (fn [block]
+                      (when (= normalized-route-name
+                               (heading-route-name block))
+                        block))
+                    candidates)})))
+
+(defn- block-by-page-name-and-block-route-name
+  [db page-id-name-or-uuid route-name]
+  (some-> (block-route-resolution db page-id-name-or-uuid route-name)
+          :block
+          (select-keys [:block/uuid])))
+
+(def-thread-api :thread-api/get-block-by-page-name-and-block-route-name
+  [repo page-id-name-or-uuid route-name]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (block-by-page-name-and-block-route-name @conn page-id-name-or-uuid route-name)))
+
+(defn- page-entity->summary
+  [page]
+  (when page
+    {:db/id (:db/id page)
+     :block/uuid (:block/uuid page)
+     :block/title (:block/title page)
+     :block/raw-title (:block/raw-title page)
+     :block/name (:block/name page)
+     :block/journal-day (:block/journal-day page)}))
+
+(def-thread-api :thread-api/get-journal-page-by-day
+  [repo journal-day]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (some-> (ldb/get-journal-page-by-day @conn journal-day)
+            page-entity->summary)))
+
+(def-thread-api :thread-api/get-latest-journals
+  [repo n]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (mapv page-entity->summary
+          (take n (ldb/get-latest-journals @conn)))))
+
+(def-thread-api :thread-api/page-exists?
+  [repo page-name tags]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (boolean (seq (ldb/page-exists? @conn page-name tags)))))
+
+(def-thread-api :thread-api/get-case-page
+  [repo page-name-or-uuid]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (some-> (ldb/get-case-page @conn page-name-or-uuid)
+            entity-util/entity->map)))
+
+(def-thread-api :thread-api/get-tags-by-name
+  [repo name]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (->> (entity-util/get-pages-by-name @conn name)
+         (keep (fn [datom]
+                 (some-> (d/entity @conn (:e datom))
+                         entity-util/entity->map)))
+         (filter ldb/class?)
+         vec)))
+
+(def-thread-api :thread-api/get-block-parent
+  [repo block-uuid]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (some-> (d/entity @conn [:block/uuid block-uuid])
+            :block/parent
+            entity-util/entity->map)))
+
+(defn- block-ref-entity
+  [db block-ref]
+  (cond
+    (uuid? block-ref)
+    (d/entity db [:block/uuid block-ref])
+
+    (and (string? block-ref) (common-util/uuid-string? block-ref))
+    (d/entity db [:block/uuid (uuid block-ref)])
+
+    :else
+    (d/entity db block-ref)))
+
+(defn- block-page-info
+  [db block-ref]
+  (when-let [block (block-ref-entity db block-ref)]
+    (when-let [page (:block/page block)]
+      {:db/id (:db/id page)
+       :block/uuid (:block/uuid page)
+       :block/title (:block/title page)
+       :block/name (:block/name page)})))
+
+(def-thread-api :thread-api/get-block-page-info
+  [repo block-ref]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (block-page-info @conn block-ref)))
+
+(def-thread-api :thread-api/get-block-immediate-children
+  [repo block-uuid]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (mapv entity-util/entity->map (ldb/get-children @conn block-uuid))))
+
+(def-thread-api :thread-api/get-block-sibling
+  [repo block-id direction]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (let [db @conn]
+      (when-let [block (d/entity db block-id)]
+        (let [sibling (case direction
+                        :left (ldb/get-left-sibling block)
+                        :right (ldb/get-right-sibling block)
+                        :last-child (some->> (:db/id block)
+                                             (ldb/get-block-last-direct-child-id db)
+                                             (d/entity db))
+                        nil)]
+          (some->> sibling
+                   (#(worker-plain/entity-forward-map db % {}))
+                   worker-plain/with-explicit-ref-fields-recursive))))))
+
+(defn- block-index-entry
+  [block parent-ids level]
+  {:db/id (:db/id block)
+   :block/uuid (:block/uuid block)
+   :block/parent {:db/id (:db/id (:block/parent block))}
+   :block/order (:block/order block)
+   :block/collapsed? (boolean (:block/collapsed? block))
+   :block/level level
+   :block.temp/has-children? (contains? parent-ids (:db/id block))})
+
+(defn- visible-index-entries
+  [index]
+  (loop [entries index
+         collapsed-level nil
+         result []]
+    (if-let [entry (first entries)]
+      (let [level (:block/level entry)
+            hidden? (and collapsed-level (> level collapsed-level))
+            collapsed-level (cond
+                              hidden? collapsed-level
+                              (:block/collapsed? entry) level
+                              :else nil)]
+        (recur (next entries)
+               collapsed-level
+               (cond-> result (not hidden?) (conj entry))))
+      result)))
+
+(defn- get-page-block-index
+  [db page-id-name-or-uuid initial-limit]
+  (assert (pos-int? initial-limit))
+  (when-let [root (or (block-ref-entity db page-id-name-or-uuid)
+                      (ldb/get-page db page-id-name-or-uuid))]
+    (let [tree-entities (vec (ldb/get-block-and-children db (:block/uuid root)))
+          children (subvec tree-entities 1)
+          parent-ids (into #{} (keep #(some-> % :block/parent :db/id)) children)
+          levels (volatile! {(:db/id root) 0})
+          index (mapv (fn [block]
+                        (let [parent-id (:db/id (:block/parent block))
+                              level (inc (get @levels parent-id 0))]
+                          (vswap! levels assoc (:db/id block) level)
+                          (block-index-entry block parent-ids level)))
+                      children)
+          initial-ids (->> index
+                           visible-index-entries
+                           (take initial-limit)
+                           (map :db/id))
+          blocks (mapv (fn [block-id]
+                         (:block (block-handler/get-block-and-children
+                                  db block-id {:children? false
+                                               :render-data? true})))
+                       initial-ids)
+          block (:block (block-handler/get-block-and-children
+                         db (:db/id root) {:children? false
+                                           :render-data? true}))]
+      {:block block
+       :index index
+       :blocks blocks})))
+
+(def-thread-api :thread-api/get-page-blocks-tree
+  [repo page-id-name-or-uuid & [option]]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (let [db @conn]
+      (if-let [initial-limit (:initial-limit option)]
+        (get-page-block-index db page-id-name-or-uuid initial-limit)
+        (when-let [page (ldb/get-page db page-id-name-or-uuid)]
+          (otree/blocks->vec-tree db (ldb/get-page-blocks db (:db/id page)) (:db/id page)))))))
+
+(defn- route-title-info
+  [db route-name]
+  (let [page (ldb/get-page db route-name)]
+    (if (and page (ldb/page? page))
+      {:page-title (:block/title page)}
+      (when (common-util/uuid-string? route-name)
+        (when-let [block (d/entity db [:block/uuid (uuid route-name)])]
+          {:block-title (:block/title block)})))))
+
+(def-thread-api :thread-api/get-route-title
+  [repo route-name]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (route-title-info @conn route-name)))
+
+(def-thread-api :thread-api/get-file-content
+  [repo path]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (:file/content (d/entity @conn [:file/path path]))))

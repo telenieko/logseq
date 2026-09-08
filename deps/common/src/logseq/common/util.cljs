@@ -6,7 +6,6 @@
             [cljs.reader :as reader]
             [clojure.edn :as edn]
             [clojure.string :as string]
-            [clojure.walk :as walk]
             [goog.string :as gstring]
             [logseq.common.log :as log]))
 
@@ -23,17 +22,6 @@
    Keep capitalization sensitivity"
   [s]
   (.normalize s "NFC"))
-
-(defn remove-nils
-  "remove pairs of key-value that has nil value from a (possibly nested) map or
-  coll of maps."
-  [nm]
-  (walk/postwalk
-   (fn [el]
-     (if (map? el)
-       (into {} (remove (comp nil? second)) el)
-       el))
-   nm))
 
 (defn remove-nils-non-nested
   "remove pairs of key-value that has nil value from a map (nested not supported)."
@@ -60,27 +48,18 @@
   (when (string? tag-name)
     (not (re-find #"[#\t\r\n]+" tag-name))))
 
-(defn tag?
-  "Whether `s` is a tag."
-  [s]
-  (and (string? s)
-       (string/starts-with? s "#")
-       (or
-        (not (string/includes? s " "))
-        (string/starts-with? s "#[[")
-        (string/ends-with? s "]]"))))
-
 (defn safe-subs
+  "Like `subs`, but clamps out-of-range indices and returns \"\" for a non-string
+  `s` instead of throwing. `subs` is a bare `.substring` passthrough, so a nil
+  `s` otherwise raises \"Cannot read properties of null\"."
   ([s start]
    (let [c (count s)]
      (safe-subs s start c)))
   ([s start end]
-   (let [c (count s)]
-     (subs s (min c start) (min c end)))))
-
-(defn unquote-string
-  [v]
-  (string/trim (subs v 1 (dec (count v)))))
+   (if (string? s)
+     (let [c (count s)]
+       (subs s (min c start) (min c end)))
+     "")))
 
 (defn wrapped-by
   [v start end]
@@ -266,15 +245,6 @@
   [fmt & args]
   (apply gstring/format fmt args))
 
-(defn remove-first [pred coll]
-  ((fn inner [coll]
-     (lazy-seq
-      (when-let [[x & xs] (seq coll)]
-        (if (pred x)
-          xs
-          (cons x (inner xs))))))
-   coll))
-
 (defn concat-without-nil
   [& cols]
   (->> (apply concat cols)
@@ -284,6 +254,17 @@
   "Current time in milliseconds"
   []
   (tc/to-long (t/now)))
+
+(defn timestamp-ms
+  "Coerce a Date or epoch-ms number to a positive ms timestamp.
+   Treats missing values and non-positive times (e.g. Linux epoch-0 birthtime) as absent."
+  [value]
+  (let [ms (cond
+             (number? value) value
+             (instance? js/Date value) (.getTime value)
+             :else nil)]
+    (when (and (number? ms) (pos? ms) (js/isFinite ms))
+      ms)))
 
 (defn get-page-title
   [page]
@@ -309,10 +290,6 @@
 (defn replace-ignore-case
   [s old-value new-value]
   (string/replace s (re-pattern (str "(?i)" (escape-regex-chars old-value))) new-value))
-
-(defn replace-first-ignore-case
-  [s old-value new-value]
-  (string/replace-first s (re-pattern (str "(?i)" (escape-regex-chars old-value))) new-value))
 
 (defn sort-coll-by-dependency
   "Sort the elements in the collection based on dependencies.

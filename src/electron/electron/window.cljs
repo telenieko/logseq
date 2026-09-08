@@ -7,7 +7,10 @@
             [clojure.string :as string]
             [electron.configs :as cfgs]
             [electron.context-menu :as context-menu]
+            [electron.db-worker :as db-worker]
+            [electron.i18n :refer [t]]
             [electron.logger :as logger]
+            [electron.spell-check :as spell-check]
             [electron.state :as state]
             [electron.utils :refer [mac? win32? linux? dev? open] :as utils]))
 
@@ -16,7 +19,10 @@
 (def MAIN_WINDOW_ENTRY (if dev?
                          ;; Use index.html to test plugins on development mode
                          "http://localhost:3001"
-                         (str "file://" (node-path/join js/__dirname "index.html"))))
+                         ;; Loading the renderer through Logseq's privileged
+                         ;; scheme keeps the parent origin non-opaque for
+                         ;; plugin iframe postMessage handshakes.
+                         "lsp://logseq.com/index.html"))
 
 (defn create-main-window!
   ([]
@@ -27,6 +33,10 @@
    (let [win-state (windowStateKeeper (clj->js {:defaultWidth 980 :defaultHeight 700}))
          native-titlebar? (cfgs/get-item :window/native-titlebar?)
          url (if graph (str url "#/?graph=" graph) url)
+         spell-check-cfg (cfgs/get-item :spell-check)
+         spell-check-enabled? (spell-check/session-spellcheck-enabled? spell-check-cfg)
+         [initial-spell-check-enabled? ready-spell-check-enabled?]
+         (spell-check/startup-spellcheck-states linux? spell-check-enabled?)
          win-opts  (cond->
                     {:backgroundColor      "#fff" ; SEE https://www.electronjs.org/docs/latest/faq#the-font-looks-blurry-what-is-this-and-what-can-i-do
                      :width                (.-width win-state)
@@ -44,7 +54,6 @@
                       :sandbox                 false
                       :webSecurity             (not dev?)
                       :contextIsolation        true
-                      :spellcheck              ((fnil identity true) (cfgs/get-item :spell-check))
                        ;; Remove OverlayScrollbars and transition `.scrollbar-spacing`
                        ;; to use `scollbar-gutter` after the feature is implemented in browsers.
                       :enableBlinkFeatures     'OverlayScrollbars'
@@ -56,25 +65,24 @@
                      linux?
                      (assoc :icon (node-path/join js/__dirname "icons/logseq.png")))
          win       (BrowserWindow. (clj->js win-opts))]
+     (spell-check/apply-window-spellcheck! win initial-spell-check-enabled?)
      (.onBeforeSendHeaders (.. session -defaultSession -webRequest)
                            (clj->js {:urls (array "*://*.youtube.com/*")})
                            (fn [^js details callback]
-                             (let [url            (.-url details)
-                                   urlObj         (js/URL. url)
-                                   origin         (.-origin urlObj)
-                                   requestHeaders (.-requestHeaders details)
-                                   no-cookie-headers (-> (bean/->clj requestHeaders)
-                                                         (dissoc :Cookie :cookie)
-                                                         bean/->js)]
-                               (if (and
-                                    (.hasOwnProperty requestHeaders "referer")
-                                    (not-empty (.-referer requestHeaders)))
-                                 (callback #js {:cancel         false
-                                                :requestHeaders no-cookie-headers})
-                                 (do
-                                   (set! (.-referer requestHeaders) origin)
-                                   (callback #js {:cancel         false
-                                                  :requestHeaders no-cookie-headers}))))))
+                             (let [requestHeaders (.-requestHeaders details)
+                                   headers (-> (bean/->clj requestHeaders)
+                                               (dissoc :Cookie :cookie)
+                                               (assoc :Referrer-Policy "strict-origin-when-cross-origin"
+                                                      :referer "https://logseq.com"))]
+                               (callback (bean/->js
+                                          {:cancel         false
+                                           :requestHeaders headers})))))
+     ;; Keep spellcheck disabled until ready-to-show on Linux to avoid the
+     ;; Electron 40+ cached dictionary initialization race (#50327).
+     (.once win "ready-to-show"
+            (fn []
+              (spell-check/apply-window-spellcheck! win ready-spell-check-enabled?)
+              (.show win)))
      (.loadURL win url)
      ;;(when dev? (.. win -webContents (openDevTools)))
      win)))
@@ -88,10 +96,9 @@
   (.destroy win))
 
 (defn close-handler
-  [^js win close-watcher-f e]
+  [^js win e]
   (.preventDefault e)
-  (when-let [dir (state/get-window-graph-path win)]
-    (close-watcher-f win dir))
+  (db-worker/release-window! (.-id win))
   (state/close-window! win)
   (let [web-contents (. win -webContents)]
     (.send web-contents "persist-zoom-level" (.getZoomLevel web-contents)))
@@ -99,8 +106,8 @@
 
 (defn on-close-actions!
   ;; TODO merge with the on close in core
-  [^js win close-watcher-f] ;; injected watcher related func
-  (.on win "close" (fn [e] (close-handler win close-watcher-f e))))
+  [^js win]
+  (.on win "close" (fn [e] (close-handler win e))))
 
 (defn switch-to-window!
   [^js win]
@@ -134,10 +141,10 @@
         (when-let [^js res (and (fn? default-open)
                                 (.showMessageBoxSync dialog
                                                      #js {:type "warning"
-                                                          :message (str "Are you sure you want to open this link? \n\n" url)
+                                                          :message (t :electron/link-open-confirm url)
                                                           :defaultId 1
                                                           :cancelId 0
-                                                          :buttons #js ["Cancel" "OK"]}))]
+                                                          :buttons #js [(t :electron/cancel) (t :electron/ok)]}))]
           (when (= res 1)
             (default-open url)))))))
 

@@ -1,10 +1,13 @@
 (ns frontend.handler.events.ui
   "UI events"
+  (:require-macros [frontend.handler.events.macros :refer [defevent!]])
   (:require [clojure.core.async :as async]
             [clojure.core.async.interop :refer [p->c]]
+            [frontend.components.assets :as assets]
             [frontend.components.cmdk.core :as cmdk]
-            [frontend.components.file-sync :as file-sync]
+            [frontend.components.icon :as icon-component]
             [frontend.components.page :as component-page]
+            [frontend.components.page-menu :as page-menu]
             [frontend.components.plugins :as plugin]
             [frontend.components.property.dialog :as property-dialog]
             [frontend.components.quick-add :as quick-add]
@@ -14,36 +17,49 @@
             [frontend.components.settings :as settings]
             [frontend.components.shell :as shell]
             [frontend.components.user.login :as login]
-            [frontend.components.whiteboard :as whiteboard]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
-            [frontend.db :as db]
+            [frontend.db.async :as db-async]
             [frontend.extensions.fsrs :as fsrs]
-            [frontend.extensions.srs :as srs]
-            [frontend.fs.sync :as sync]
-            [frontend.handler.db-based.rtc :as rtc-handler]
+            [frontend.extensions.lightbox :as lightbox]
+            [frontend.extensions.pdf.assets :as pdf-assets]
+            [frontend.fs :as fs]
+            [frontend.handler.assets :as assets-handler]
+            [frontend.handler.db-based.rtc-flows :as rtc-flows]
+            [frontend.handler.db-based.sync :as rtc-handler]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.events :as events]
-            [frontend.handler.file-based.native-fs :as nfs-handler]
-            [frontend.handler.file-sync :as file-sync-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
             [frontend.handler.plugin :as plugin-handler]
+            [frontend.handler.reaction :as reaction-handler]
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.user :as user-handler]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.instrumentation.sentry :as sentry-event]
             [frontend.state :as state]
-            [frontend.ui :as ui]
             [frontend.util :as util]
+            [frontend.util.entity :as entity]
             [goog.dom :as gdom]
+            [lambdaisland.glogi :as log]
+            [logseq.common.config :as common-config]
+            [logseq.common.path :as path]
             [logseq.common.util :as common-util]
             [logseq.shui.ui :as shui]
-            [mobile.state :as mobile-state]
-            [promesa.core :as p]))
+            [promesa.core :as p]
+            [logseq.shui.dialog.core :as shui-dialog]))
 
-(defmethod events/handle :go/search [_]
+(defn- <asset-file-ready?
+  [asset file-name]
+  (if (or config/publishing?
+          (seq (:logseq.property.asset/external-url asset)))
+    (p/resolved true)
+    (fs/file-exists?
+     (config/get-repo-dir (state/get-current-repo))
+     (path/path-join common-config/local-assets-dir file-name))))
+
+(defevent! :go/search [_]
   (when-not (editor-handler/dialog-exists? :ls-dialog-cmdk)
     (shui/dialog-open!
      cmdk/cmdk-modal
@@ -53,63 +69,87 @@
       :close-btn? false
       :onEscapeKeyDown (fn [e] (.preventDefault e))})))
 
-(defmethod events/handle :command/run [_]
-  (when (util/electron?)
-    (shui/dialog-open! shell/shell)))
-
-(defmethod events/handle :notification/show [[_ {:keys [content status clear?]}]]
+(defevent! :notification/show [[_ {:keys [content status clear?]}]]
   (notification/show! content status clear?))
 
-(defmethod events/handle :command/run [_]
+(defevent! :shell/run [_]
   (when (util/electron?)
     (shui/dialog-open! shell/shell)))
 
-(defmethod events/handle :go/plugins [_]
+(defevent! :go/plugins [_]
   (plugin/open-plugins-modal!))
 
-(defmethod events/handle :go/plugins-waiting-lists [_]
+(defevent! :go/plugins-waiting-lists [_]
   (plugin/open-waiting-updates-modal!))
 
-(defmethod events/handle :go/plugins-from-file [[_ plugins]]
+(defevent! :go/plugins-from-file [[_ plugins]]
   (plugin/open-plugins-from-file-modal! plugins))
 
-(defmethod events/handle :go/install-plugin-from-github [[_]]
+(defevent! :go/install-plugin-from-github [[_]]
   (shui/dialog-open!
    (plugin/install-from-github-release-container)))
 
-(defmethod events/handle :go/plugins-settings [[_ pid nav? title]]
+(defevent! :go/plugins-settings [[_ pid nav? title]]
   (when pid
     (state/set-state! :plugin/focused-settings pid)
     (state/set-state! :plugin/navs-settings? (not (false? nav?)))
     (plugin/open-focused-settings-modal! title)))
 
-(defmethod events/handle :go/proxy-settings [[_ agent-opts]]
+(defevent! :go/proxy-settings [[_ agent-opts]]
   (shui/dialog-open!
    (plugin/user-proxy-settings-container agent-opts)
    {:id :https-proxy-panel :center? true :class "lg:max-w-2xl"}))
 
-(defmethod events/handle :redirect-to-home [_]
-  (page-handler/create-today-journal!)
-  (when (util/capacitor-new?)
-    (mobile-state/redirect-to-tab! "home")))
+(defevent! :go/sync-server-settings [[_]]
+  (shui/dialog-open!
+   (settings/sync-server-url-settings-container)
+   {:id :sync-server-panel :center? true :class "lg:max-w-2xl"}))
 
-(defmethod events/handle :page/show-delete-dialog [[_ selected-rows ok-handler]]
+(defevent! :go/publish-server-settings [[_]]
+  (shui/dialog-open!
+   (settings/publish-server-url-settings-container)
+   {:id :publish-server-panel :center? true :class "lg:max-w-2xl"}))
+
+(defevent! :redirect-to-home [_]
+  (page-handler/create-today-journal!)
+  (when (util/capacitor?)
+    (state/pub-event! [:mobile/set-tab "home"])))
+
+(defevent! :page/show-delete-dialog [[_ selected-rows ok-handler]]
   (shui/dialog-open!
    (component-page/batch-delete-dialog selected-rows ok-handler)))
 
-(defmethod events/handle :modal/show-cards [[_ cards-id]]
-  (let [db-based? (config/db-based-graph? (state/get-current-repo))]
-    (shui/dialog-open!
-     (if db-based? (fn [] (fsrs/cards-view cards-id)) srs/global-cards)
-     {:id :srs
-      :label "flashcards__cp"})))
+(defevent! :modal/show-cards [[_ cards-id]]
+  (shui/dialog-open!
+   (fn [] (fsrs/cards-view cards-id nil))
+   {:id :srs
+    :label :flashcards__cp}))
 
-(defmethod events/handle :modal/show-themes-modal [[_ classic?]]
+(defevent! :modal/show-themes-modal [[_ classic?]]
   (if classic?
     (plugin/open-select-theme!)
     (route-handler/go-to-search! :themes)))
 
-(defmethod events/handle :ui/toggle-appearance [_]
+(defn- <page-for-publish-dialog
+  [page-name]
+  (let [lookup (if (util/uuid-string? page-name)
+                 [:block/uuid (uuid page-name)]
+                 [:block/name page-name])]
+    (state/<invoke-db-worker :thread-api/pull
+                             (state/get-current-repo)
+                             [:db/id :block/uuid :block/title :block/name {:block/tags [:db/ident]}]
+                             lookup)))
+
+(defevent! :publish/open-dialog [_]
+  (when-not config/publishing?
+    (p/let [page (when-let [page-name (state/get-current-page)]
+                   (<page-for-publish-dialog page-name))]
+      (when (entity/page? page)
+        (shui/dialog-open!
+         (fn [] (page-menu/publish-page-dialog page))
+         {:class "w-auto max-w-md"})))))
+
+(defevent! :ui/toggle-appearance [_]
   (let [popup-id "appearance_settings"]
     (if (gdom/getElement popup-id)
       (shui/popup-hide! popup-id)
@@ -118,13 +158,14 @@
        (fn []
          (settings/appearance))
        {:id popup-id
+        :focus-trigger? false
         :align :end}))))
 
-(defmethod events/handle :plugin/consume-updates [[_ id prev-pending? updated?]]
-  (let [downloading?   (:plugin/updates-downloading? @state/state)
+(defevent! :plugin/consume-updates [[_ id prev-pending? updated?]]
+  (let [downloading?   (:plugin/updates-downloading? (state/get-state))
         auto-checking? (plugin-handler/get-auto-checking?)]
     (when-let [coming (and (not downloading?)
-                           (get-in @state/state [:plugin/updates-coming id]))]
+                           (get-in (state/get-state) [:plugin/updates-coming id]))]
       (let [error-code (:error-code coming)
             error-code (if (= error-code (str :no-new-version)) nil error-code)
             title      (:title coming)]
@@ -132,7 +173,7 @@
           (if-not error-code
             (plugin/set-updates-sub-content! (str title "...") 0)
             (notification/show!
-             (str "[Checked]<" title "> " error-code) :error)))))
+             (str "[" (t :plugin/checked) "]<" title "> " error-code) :error)))))
 
     (if (and updated? downloading?)
       ;; try to start consume downloading item
@@ -143,7 +184,7 @@
         (plugin-handler/close-updates-downloading))
 
       ;; try to start consume pending item
-      (if-let [next-pending (second (first (:plugin/updates-pending @state/state)))]
+      (if-let [next-pending (second (first (:plugin/updates-pending (state/get-state))))]
         (do
           (println "Updates: take next pending - " (:id next-pending))
           (js/setTimeout
@@ -159,107 +200,190 @@
               (plugin/open-waiting-updates-modal!))
             (plugin-handler/set-auto-checking! false))))))
 
-(defmethod events/handle :plugin/loader-perf-tip [[_ {:keys [^js o _s _e]}]]
+(defevent! :plugin/loader-perf-tip [[_ {:keys [^js o _s _e]}]]
   (when-let [opts (.-options o)]
     (notification/show!
      (plugin/perf-tip-content (.-id o) (.-name opts) (.-url opts))
      :warning false (.-id o))))
 
-(defn- refresh-cb []
-  (page-handler/create-today-journal!)
-  (events/file-sync-restart!))
+(defn- <block-ref
+  [block-ref]
+  (cond
+    (map? block-ref)
+    (p/resolved block-ref)
 
-(defmethod events/handle :graph/ask-for-re-fresh [_]
-  (shui/dialog-open!
-   [:div {:style {:max-width 700}}
-    [:p (t :sync-from-local-changes-detected)]
-    [:div.flex.justify-end
-     (ui/button
-      (t :yes)
-      :autoFocus "on"
-      :class "ui__modal-enter"
-      :on-click (fn []
-                  (shui/dialog-close!)
-                  (nfs-handler/refresh! (state/get-current-repo) refresh-cb)))]]))
+    (uuid? block-ref)
+    (db-async/<get-block (state/get-current-repo) block-ref {:children? false})
 
-(defn- editor-new-property [block target {:keys [selected-blocks] :as opts}]
-  (let [editing-block (state/get-edit-block)
-        pos (state/get-edit-pos)
-        edit-block-or-selected (cond
-                                 editing-block
-                                 [editing-block]
-                                 (seq selected-blocks)
-                                 selected-blocks
-                                 :else
-                                 (seq (keep #(db/entity [:block/uuid %]) (state/get-selection-block-ids))))
-        current-block (when-let [s (state/get-current-page)]
-                        (when (util/uuid-string? s)
-                          (db/entity [:block/uuid (uuid s)])))
-        blocks (or (when block [block])
-                   edit-block-or-selected
-                   (when current-block [current-block]))
-        opts' (cond-> opts
-                editing-block
-                (assoc :original-block editing-block
-                       :edit-original-block
-                       (fn [{:keys [editing-default-property?]}]
-                         (when editing-block
-                           (let [content (:block/title (db/entity (:db/id editing-block)))
-                                 esc? (= "Escape" (state/get-ui-last-key-code))
-                                 [content' pos] (cond
-                                                  esc?
-                                                  [nil pos]
-                                                  (and (>= (count content) pos)
-                                                       (>= pos 2)
-                                                       (= (util/nth-safe content (dec pos))
-                                                          (util/nth-safe content (- pos 2))
-                                                          ";"))
-                                                  [(str (common-util/safe-subs content 0 (- pos 2))
-                                                        (common-util/safe-subs content pos))
-                                                   (- pos 2)]
-                                                  :else
-                                                  [nil pos])]
-                             (when content'
-                               (if editing-default-property?
-                                 (editor-handler/save-block! (state/get-current-repo) (:block/uuid editing-block) content')
-                                 (editor-handler/edit-block! editing-block (or pos :max)
-                                                             (cond-> {}
-                                                               content'
-                                                               (assoc :custom-content content'))))))))))]
-    (when (seq blocks)
-      (let [target' (or target
-                        (some-> (state/get-edit-input-id)
-                                (gdom/getElement))
-                        (first (state/get-selection-blocks)))]
-        (if target'
-          (shui/popup-show! target'
-                            #(property-dialog/dialog blocks opts')
-                            {:align "start"})
-          (shui/dialog-open! #(property-dialog/dialog blocks opts')
-                             {:id :property-dialog
-                              :align "start"}))))))
+    (and (string? block-ref) (util/uuid-string? block-ref))
+    (db-async/<get-block (state/get-current-repo) (uuid block-ref) {:children? false})
 
-(defmethod events/handle :editor/new-property [[_ {:keys [block target] :as opts}]]
+    (number? block-ref)
+    (db-async/<get-block (state/get-current-repo) block-ref {:children? false})
+
+    :else
+    (p/resolved nil)))
+
+(defn- <selection-blocks
+  []
+  (when-let [repo (and (seq (state/get-selection-block-ids))
+                       (state/get-current-repo))]
+    (p/let [results (db-async/<get-blocks repo (state/get-selection-block-ids))]
+      (seq (keep :block results)))))
+
+(defn- edit-original-block!
+  [editing-block pos {:keys [editing-default-property?]}]
+  (when editing-block
+    (p/let [editing-block (<block-ref (:block/uuid editing-block))]
+      (when editing-block
+        (let [content (:block/title editing-block)
+              esc? (= "Escape" (state/get-ui-last-key-code))
+              [content' pos] (cond
+                               esc?
+                               [nil pos]
+
+                               (and (>= (count content) pos)
+                                    (>= pos 2)
+                                    (= (util/nth-safe content (dec pos))
+                                       (util/nth-safe content (- pos 2))
+                                       ";"))
+                               [(str (common-util/safe-subs content 0 (- pos 2))
+                                     (common-util/safe-subs content pos))
+                                (- pos 2)]
+
+                               :else
+                               [nil pos])]
+          (when content'
+            (if editing-default-property?
+              (editor-handler/save-block! (state/get-current-repo) (:block/uuid editing-block) content')
+              (editor-handler/edit-block! editing-block (or pos :max)
+                                          (cond-> {}
+                                            content'
+                                            (assoc :custom-content content'))))))))))
+
+(defn- editor-new-property [block target {:keys [selected-blocks popup-id editing-block editing-pos editing-target] :as opts}]
+  (p/let [editing-block (if editing-block
+                          (p/resolved editing-block)
+                          (<block-ref (some-> (state/get-edit-block) :block/uuid)))
+          selected-blocks (cond
+                            editing-block
+                            (p/resolved nil)
+
+                            (seq selected-blocks)
+                            (p/resolved selected-blocks)
+
+                            :else
+                            (<selection-blocks))
+          current-block (when-let [s (state/get-current-page)]
+                          (when (util/uuid-string? s)
+                            (<block-ref (uuid s))))]
+    (let [opts (dissoc opts :editing-block :editing-pos :editing-target)
+          pos (or editing-pos (state/get-edit-pos))
+          edit-block-or-selected (cond
+                                   editing-block
+                                   [editing-block]
+
+                                   (seq selected-blocks)
+                                   selected-blocks)
+          blocks (or (when block [block])
+                     edit-block-or-selected
+                     (when current-block [current-block]))
+          opts' (cond-> opts
+                  editing-block
+                  (assoc :original-block editing-block
+                         :edit-original-block #(edit-original-block! editing-block pos %)))]
+      (when (seq blocks)
+        (let [target' (or target
+                          editing-target
+                          (some-> (state/get-edit-input-id)
+                                  (gdom/getElement))
+                          (first (state/get-selection-blocks)))]
+          (if target'
+            (shui/popup-show! target'
+                              #(property-dialog/dialog blocks opts')
+                              (cond-> {:align "start"
+                                       :force-popover? true}
+                                popup-id
+                                (assoc :id popup-id)))
+            (shui/dialog-open! #(property-dialog/dialog blocks opts')
+                               {:id :property-dialog
+                                :align "start"})))))))
+
+(defevent! :editor/new-property [[_ {:keys [block target] :as opts}]]
+  (when-not config/publishing?
+    (p/let [editing-block (<block-ref (some-> (state/get-edit-block) :block/uuid))
+            editing-target (some-> (state/get-edit-input-id)
+                                   (gdom/getElement))
+            opts' (cond-> opts
+                    editing-block
+                    (assoc :editing-block editing-block
+                           :editing-pos (state/get-edit-pos))
+                    editing-target
+                    (assoc :editing-target editing-target))]
+      (p/do!
+       (editor-handler/save-current-block!)
+       (editor-new-property block target opts')))))
+
+(defn- reaction-target-block-ids [blocks]
+  (let [blocks' (cond
+                  (nil? blocks) nil
+                  (sequential? blocks) blocks
+                  :else [blocks])]
+    (vec
+     (or (seq (keep :block/uuid blocks'))
+         (some-> (state/get-edit-block) :block/uuid vector)
+         (seq (state/get-selection-block-ids))))))
+
+(defn- editor-new-reaction [blocks target]
+  (let [target-block-ids (reaction-target-block-ids blocks)
+        target' (or target
+                    (some-> (state/get-edit-input-id)
+                            (gdom/getElement))
+                    (first (state/get-selection-blocks)))
+        on-pick (fn [popup-id icon]
+                  (let [emoji-id (:id icon)
+                        emoji? (= :emoji (:type icon))]
+                    (if emoji?
+                      (do
+                        (doseq [target-block-id target-block-ids]
+                          (reaction-handler/toggle-reaction! target-block-id emoji-id))
+                        (shui/popup-hide! popup-id))
+                      (notification/show! (t :block.reaction/emoji-required-warning) :warning))))]
+    (when (and (seq target-block-ids) target')
+      (shui/popup-hide! :selection-action-bar)
+      (shui/popup-show!
+       target'
+       (fn [{:keys [id]}]
+         (icon-component/icon-search
+          {:on-chosen (fn [_e icon _keep-popup?] (on-pick id icon))
+           :tabs [[:emoji (t :icon/tab-emojis)]]
+           :default-tab :emoji
+           :show-used? true
+           :icon-value nil}))
+       {:align :start
+        :content-props {:class "ls-icon-picker"}}))))
+
+(defevent! :editor/new-reaction [[_ {:keys [block blocks target]}]]
   (when-not config/publishing?
     (p/do!
      (editor-handler/save-current-block!)
-     (editor-new-property block target opts))))
+     (editor-new-reaction (if (seq blocks) blocks block) target))))
 
-(defmethod events/handle :graph/new-db-graph [[_ _opts]]
+(defevent! :graph/new-db-graph [[_ _opts]]
   (shui/dialog-open!
    repo/new-db-graph
    {:id :new-db-graph
-    :title [:h2 "Create a new graph"]
+    :title (t :graph/create-new)
     :align (if (util/mobile?) :top :center)
     :style {:max-width "500px"}}))
 
-(defmethod events/handle :dialog-select/graph-open []
+(defevent! :dialog-select/graph-open []
   (select/dialog-select! :graph-open))
 
-(defmethod events/handle :dialog-select/graph-remove []
+(defevent! :dialog-select/graph-remove []
   (select/dialog-select! :graph-remove))
 
-(defmethod events/handle :dialog-select/db-graph-replace []
+(defevent! :dialog-select/db-graph-replace []
   (select/dialog-select! :db-graph-replace))
 
 (defn- hide-action-bar!
@@ -267,58 +391,116 @@
   (when (editor-handler/popup-exists? :selection-action-bar)
     (shui/popup-hide! :selection-action-bar)))
 
-(defmethod events/handle :editor/show-action-bar []
+(defevent! :editor/show-action-bar []
   (let [selection (state/get-selection-blocks)
         first-visible-block (some #(when (util/el-visible-in-viewport? % true) %) selection)]
-    (when first-visible-block
+    (when (and first-visible-block
+               (not (shui-dialog/has-dialog?)))
       (hide-action-bar!)
       (shui/popup-show!
        first-visible-block
        (fn []
          (selection/action-bar))
        {:id :selection-action-bar
+        :focus-trigger? false
+        :force-popover? true
         :root-props {:modal false}
         :content-props {:side "top"
-                        :class "!py-0 !px-0 !border-none"
-                        :modal? false}
+                        :onCloseAutoFocus #(.preventDefault %)
+                        :class "!w-max !max-w-none !overflow-visible !py-0 !px-0 !border-none"}
         :auto-side? false
         :align :start}))))
 
-(defmethod events/handle :editor/hide-action-bar []
+(defevent! :editor/hide-action-bar []
   (hide-action-bar!)
   (state/set-state! :mobile/show-action-bar? false))
 
-(defmethod events/handle :user/logout [[_]]
-  (file-sync-handler/reset-session-graphs)
-  (sync/remove-all-pwd!)
-  (file-sync-handler/reset-user-state!)
+(defevent! :user/logout [[_]]
   (login/sign-out!))
 
-(defmethod events/handle :user/login [[_ host-ui?]]
-  (if (or host-ui? (not util/electron?))
-    (js/window.open config/LOGIN-URL)
-    (if (mobile-util/native-platform?)
-      (route-handler/redirect! {:to :user-login})
-      (login/open-login-modal!))))
+(defevent! :user/login [[_]]
+  (if (mobile-util/native-platform?)
+    (route-handler/redirect! {:to :user-login})
+    (login/open-login-modal!)))
 
-(defmethod events/handle :whiteboard/onboarding [[_ opts]]
+(defevent! :asset/dialog-edit-external-url [[_ asset-block pdf-current]]
   (shui/dialog-open!
-   (fn [{:keys [close]}] (whiteboard/onboarding-welcome close))
-   (merge {:close-btn?      false
-           :center?         true
-           :close-backdrop? false} opts)))
+   (assets/edit-external-url-content asset-block pdf-current)
+   {:id :edit-external-asset-source-dialog
+    :title (if asset-block (t :asset/edit-title) (t :asset/create-title))
+    :center? true}))
 
-(defn- enable-beta-features!
+(defevent! :asset/show-preview [[_ asset]]
+  (when-let [asset-type-str (:logseq.property.asset/type asset)]
+    (let [asset-type (keyword asset-type-str)
+          image? (contains? (common-config/img-formats) asset-type)
+          video? (contains? config/video-formats asset-type)
+          pdf? (= :pdf asset-type)
+          file-name (str (:block/uuid asset) "." asset-type-str)
+          ;; Prefer external-url so plugin-sandboxed assets resolve to their
+          ;; real on-disk path; mirrors the asset-cp render-side fix.
+          rel-path (or (:logseq.property.asset/external-url asset)
+                       (path/path-join (str "../" common-config/local-assets-dir) file-name))]
+      (cond
+        image?
+        (p/let [url (assets-handler/<make-asset-url rel-path)]
+          (when url
+            (lightbox/preview-images!
+             [{:src url
+               :w (or (:logseq.property.asset/width asset) 1200)
+               :h (or (:logseq.property.asset/height asset) 800)}])))
+
+        video?
+        (p/let [file-ready? (<asset-file-ready? asset file-name)
+                requested? (assets-handler/maybe-request-remote-asset-download!
+                            (state/get-current-repo)
+                            asset
+                            file-ready?)]
+          (if requested?
+            (notification/show! (t :asset/downloading))
+            (p/let [url (assets-handler/<make-asset-url rel-path)]
+              (when url
+                (shui/dialog-open!
+                 (fn []
+                   [:div.flex.flex-col.gap-2.items-center
+                    [:div.font-medium.text-sm.self-start.truncate.max-w-full
+                     (:block/title asset)]
+                    [:video.rounded.max-w-full
+                     {:src url
+                      :controls true
+                      :autoPlay true
+                      :style {:max-height "80vh"}}]])
+                 {:id :asset-video-preview
+                  :auto-width? true
+                  :center? true})))))
+
+        pdf?
+        (p/let [url (assets-handler/<make-asset-url rel-path)]
+          (when-let [current (pdf-assets/inflate-asset rel-path {:block asset :href url})]
+            (state/set-current-pdf! current)))
+
+        :else
+        (route-handler/redirect-to-page! (:block/uuid asset))))))
+
+(defn ensure-user-rsa-keys-if-possible!
   []
-  (when-not (false? (state/enable-sync?)) ; user turns it off
-    (file-sync-handler/set-sync-enabled! true)))
+  (if @state/*db-worker
+    (-> (p/do!
+         (state/pub-event! [:rtc/sync-app-state])
+         (state/<invoke-db-worker :thread-api/set-db-sync-config
+                                  {:enabled? true
+                                   :ws-url (config/db-sync-ws-url)
+                                   :http-base (config/db-sync-http-base)})
+         (state/<invoke-db-worker :thread-api/db-sync-ensure-user-rsa-keys))
+        (p/catch (fn [error]
+                   (log/error :db-sync/ensure-user-rsa-keys-failed error)
+                   nil)))
+    (p/resolved nil)))
 
-;; TODO: separate rtc and file-based implementation
-(defmethod events/handle :user/fetch-info-and-graphs [[_]]
+(defevent! :user/fetch-info-and-graphs [[_]]
   (state/set-state! [:ui/loading? :login] false)
   (async/go
-    (let [result (async/<! (sync/<user-info sync/remoteapi))
-          mobile-or-web? (or (util/mobile?) util/web-platform?)]
+    (let [result (async/<! (user-handler/<user-info user-handler/remoteapi))]
       (cond
         (instance? ExceptionInfo result)
         nil
@@ -326,34 +508,20 @@
         (do
           (state/set-user-info! result)
           (when-let [uid (user-handler/user-uuid)]
-            (sentry-event/set-user! uid))
-          (let [status (if (user-handler/alpha-or-beta-user?) :welcome :unavailable)]
-            (when (and (= status :welcome) (user-handler/logged-in?))
-              (enable-beta-features!)
+            (sentry-event/set-user! uid)
+            (ensure-user-rsa-keys-if-possible!))
+          (let [status (if (user-handler/alpha-or-beta-user?) :welcome :unavailable)
+                fetch-graphs? (and (user-handler/logged-in?)
+                                   (or (= status :welcome)
+                                       (user-handler/rtc-group?)))]
+            (when fetch-graphs?
               (async/<! (p->c (rtc-handler/<get-remote-graphs)))
-              (when-not mobile-or-web?
-                (async/<! (file-sync-handler/load-session-graphs)))
-              (p/let [repos (repo-handler/refresh-repos!)]
-                (when-let [repo (state/get-current-repo)]
-                  (when-not mobile-or-web?
-                    (when (some #(and (= (:url %) repo)
-                                      (vector? (:sync-meta %))
-                                      (util/uuid-string? (first (:sync-meta %)))
-                                      (util/uuid-string? (second (:sync-meta %)))) repos)
-                      (sync/<sync-start))))))
-            (when-not mobile-or-web?
-              (file-sync/maybe-onboarding-show status))))))))
+              (repo-handler/refresh-repos!)
+              (when-let [current-repo (state/get-current-repo)]
+                (when (some #(= current-repo (:url %)) (state/get-rtc-graphs))
+                  (rtc-flows/trigger-rtc-start current-repo))))))))))
 
-(defmethod events/handle :file-sync/onboarding-tip [[_ type opts]]
-  (let [type (keyword type)]
-    (when-not (config/db-based-graph? (state/get-current-repo))
-      (shui/dialog-open!
-       (file-sync/make-onboarding-panel type)
-       (merge {:close-btn? false
-               :center? true
-               :close-backdrop? (not= type :welcome)} opts)))))
-
-(defmethod events/handle :dialog/show-block [[_ block option]]
+(defevent! :dialog/show-block [[_ block option]]
   (shui/dialog-open!
    [:div.p-8.w-full.h-full
     (component-page/page-container block option)]
@@ -362,7 +530,7 @@
     :content-props {:class "ls-dialog-block"}
     :onEscapeKeyDown (fn [e] (.preventDefault e))}))
 
-(defmethod events/handle :dialog/quick-add [_]
+(defevent! :dialog/quick-add [_]
   (shui/dialog-open!
    [:div.w-full.h-full
     (quick-add/quick-add)]

@@ -14,16 +14,16 @@
 
 (def internal-built-in-property-types
   "Valid property types only for use by internal built-in-properties"
-  #{:keyword :map :coll :any :entity :class :page :property :string :raw-number})
+  #{:keyword :map :coll :any :entity :class :page :property :string :json :raw-number})
 
 (def user-built-in-property-types
   "Valid property types for users in order they appear in the UI"
-  [:default :number :date :datetime :checkbox :url :node])
+  [:default :number :date :datetime :checkbox :url :node :asset])
 
 (def user-allowed-internal-property-types
   "Internal property types that users are allowed to store. These aren't available in the UI
    so these would normally be created via EDN or the API."
-  #{:map})
+  #{:map :json :string})
 
 (assert (set/subset? user-allowed-internal-property-types internal-built-in-property-types))
 
@@ -33,7 +33,7 @@
 
 (def cardinality-property-types
   "Valid property types that can change cardinality"
-  #{:default :number :url :date :node})
+  #{:default :number :url :date :node :asset})
 
 (def default-value-ref-property-types
   "Valid ref property :type for default value support"
@@ -63,7 +63,7 @@
 (def user-ref-property-types
   "User ref types. Property values that users see are stored in either
   :logseq.property/value or :block/title. :block/title is for all the page related types"
-  (into #{:date :node} value-ref-property-types))
+  (into #{:date :node :asset} value-ref-property-types))
 
 (assert (set/subset? user-ref-property-types
                      (set user-built-in-property-types))
@@ -99,12 +99,14 @@
 
 (defn- url-entity?
   "Empty string, url or macro url"
-  [db val {:keys [new-closed-value?]}]
+  [db val {:keys [new-closed-value? skip-strict-url-validate?]}]
   (if new-closed-value?
     (or (url? val) (macro-url? val))
     (when-let [ent (d/entity db val)]
       (let [title (:block/title ent)]
-        (or (string/blank? title) (url? title) (macro-url? title))))))
+        (if skip-strict-url-validate?
+          (string? title)
+          (or (string/blank? title) (url? title) (macro-url? title)))))))
 
 (defn- entity?
   [db id]
@@ -134,12 +136,23 @@
   (if new-closed-value?
     (string? s)
     (when-let [ent (d/entity db s)]
-      (string? (:block/title ent)))))
+      (and (string? (:block/title ent))
+           (some? (:block/page ent))))))
 
 (defn- node-entity?
   [db val]
   (when-let [ent (d/entity db val)]
     (some? (:block/title ent))))
+
+;; :logseq.class/Asset is in ldb/private-tags, so users can't type `#Asset`
+;; inline — we use the class programmatically here to scope :asset property
+;; values to uploaded asset blocks.
+(defn- asset-entity?
+  [db val]
+  (when-let [ent (d/entity db val)]
+    (and (some? (:block/title ent))
+         (contains? (set (map :db/ident (:block/tags ent)))
+                    :logseq.class/Asset))))
 
 (defn- date?
   [db val]
@@ -147,33 +160,17 @@
     (and (some? (:block/title ent))
          (entity-util/journal? ent))))
 
-(def built-in-validation-schemas
-  "Map of types to malli validation schemas that validate a property value for that type"
-  {:default  [:fn
-              {:error/message "should be a text block"}
-              text-entity?]
-   :number   [:fn
-              {:error/message "should be a number"}
-              number-entity?]
-   :date     [:fn
-              {:error/message "should be a journal date"}
-              date?]
-   :datetime [:fn
-              {:error/message "should be a datetime"}
-              number?]
-   :checkbox boolean?
-   :url      [:fn
-              {:error/message "should be a URL"}
-              url-entity?]
-   :node   [:fn
-            {:error/message "should be a page/block with tags"}
-            node-entity?]
-
-   ;; Internal usage
-   ;; ==============
-
-   :string   string?
-   :raw-number number?
+;; Internal usage
+(def internal-validation-schemas
+  {:string   [:fn
+              {:error/message "should be a string"}
+              string?]
+   :json     [:fn
+              {:error/message "should be JSON string"}
+              string?]
+   :raw-number [:fn
+                {:error/message "should be a raw number"}
+                number?]
    :entity   [:fn
               {:error/message "should be an Entity"}
               entity?]
@@ -186,11 +183,46 @@
    :page     [:fn
               {:error/message "should be a Page"}
               page-entity?]
-   :keyword  keyword?
-   :map      map?
+   :keyword  [:fn
+              {:error/message "should be a Clojure keyword"}
+              keyword?]
+   :map      [:fn
+              {:error/message "should be a Clojure map"}
+              map?]
    ;; coll elements are ordered as it's saved as a vec
-   :coll     coll?
+   :coll     [:fn
+              {:error/message "should be a collection"}
+              coll?]
    :any      some?})
+
+(def built-in-validation-schemas
+  "Map of types to malli validation schemas that validate a property value for that type"
+  (into
+   {:default  [:fn
+               {:error/message "should be a text block"}
+               text-entity?]
+    :number   [:fn
+               {:error/message "should be a number"}
+               number-entity?]
+    :date     [:fn
+               {:error/message "should be a journal date"}
+               date?]
+    :datetime [:fn
+               {:error/message "should be a datetime"}
+               number?]
+    :checkbox [:fn
+               {:error/message "should be a boolean"}
+               boolean?]
+    :url      [:fn
+               {:error/message "should be a URL"}
+               url-entity?]
+    :node   [:fn
+             {:error/message "should be a node with a title"}
+             node-entity?]
+    :asset  [:fn
+             {:error/message "should be an asset node"}
+             asset-entity?]}
+   internal-validation-schemas))
 
 (assert (= (set (keys built-in-validation-schemas))
            (into internal-built-in-property-types
@@ -199,7 +231,7 @@
 
 (def property-types-with-db
   "Property types whose validation fn requires a datascript db"
-  #{:default :url :number :date :node :entity :class :property :page})
+  #{:default :url :number :date :node :asset :entity :class :property :page})
 
 ;; Helper fns
 ;; ==========

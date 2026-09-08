@@ -9,35 +9,35 @@
             [frontend.components.editor :as editor]
             [frontend.components.page :as page]
             [frontend.components.reference :as reference]
-            [frontend.components.whiteboard :as whiteboard]
+            [frontend.components.user.login :as user.login]
             [frontend.config :as config]
             [frontend.context.i18n :as i18n]
-            [frontend.db.react :as react]
             [frontend.db.restore :as db-restore]
             [frontend.error :as error]
             [frontend.handler.command-palette :as command-palette]
-            [frontend.handler.db-based.vector-search-flows :as vector-search-flows]
+            [frontend.handler.e2ee]
             [frontend.handler.events :as events]
+            [frontend.handler.events.export]
+            [frontend.handler.events.rtc]
             [frontend.handler.events.ui]
-            [frontend.handler.file-based.events]
-            [frontend.handler.file-based.file :as file-handler]
+            [frontend.handler.graph :as graph-handler]
             [frontend.handler.global-config :as global-config-handler]
-            [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
+            [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.plugin-config :as plugin-config-handler]
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.repo-config :as repo-config-handler]
+            [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.user :as user-handler]
-            [frontend.idb :as idb]
+            [frontend.common.idb :as idb]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.instrumentation.core :as instrument]
             [frontend.modules.shortcut.core :as shortcut]
             [frontend.persist-db :as persist-db]
-            [frontend.persist-db.browser :as db-browser]
             [frontend.state :as state]
             [frontend.util :as util]
-            [frontend.util.persist-var :as persist-var]
+            [frontend.util.url :as url-util]
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
             [promesa.core :as p]))
@@ -49,24 +49,12 @@
           (when-not (error/ignored? message)
             (log/error :exception error)))))
 
-(defn- watch-for-date!
-  []
-  (let [f (fn []
-            (let [repo (state/get-current-repo)]
-              (when (or
-                     (config/db-based-graph? repo)
-                     (and (not (state/nfs-refreshing?))
-                          (not (contains? (:file/unlinked-dirs @state/state)
-                                          (config/get-repo-dir repo)))))
-                ;; Don't create the journal file until user writes something
-                (page-handler/create-today-journal!))))]
-    (f)
-    (js/setInterval f 5000)))
-
 (defn restore-and-setup!
   [repo]
   (when repo
-    (-> (p/let [_ (db-restore/restore-graph! repo)]
+    (-> (p/let [_ (db-restore/restore-graph! repo)
+                _ (graph-handler/<upsert-current-graph-registry!)]
+          (graph-handler/remember-current-graph-id-in-tab!)
           (repo-config-handler/start {:repo repo}))
         (p/then
          (fn []
@@ -91,9 +79,7 @@
 
            (page-handler/init-commands!)
 
-           (watch-for-date!)
-           (when (and (not (config/db-based-graph? repo)) (util/electron?))
-             (file-handler/watch-for-current-graph-dir!))))
+           (page-handler/watch-for-date!)))
         (p/catch (fn [error]
                    (log/error :exception error))))))
 
@@ -112,15 +98,12 @@
   (state/set-page-blocks-cp! page/page-cp)
   (state/set-component! :block/->hiccup block/->hiccup)
   (state/set-component! :block/linked-references reference/references)
-  (state/set-component! :whiteboard/tldraw-preview whiteboard/tldraw-preview)
-  (state/set-component! :block/single-block block/single-block-cp)
   (state/set-component! :block/container block/block-container)
   (state/set-component! :block/inline-title block/inline-title)
   (state/set-component! :block/breadcrumb block/breadcrumb)
   (state/set-component! :block/reference block/block-reference)
   (state/set-component! :block/blocks-container block/blocks-container)
   (state/set-component! :block/properties-cp block/db-properties-cp)
-  (state/set-component! :block/embed block/block-embed)
   (state/set-component! :block/page-cp block/page-cp)
   (state/set-component! :block/inline-text block/inline-text)
   (state/set-component! :block/asset-cp block/asset-cp)
@@ -134,68 +117,89 @@
     (p/let [info (ipc/ipc :system/info)]
       (state/set-state! :system/info (bean/->clj info)))))
 
+(defn- current-url-target
+  []
+  (try
+    (url-util/parse-web-url-target (.-href js/window.location))
+    (catch js/Error e
+      (log/warn :url-target/parse-failed e)
+      nil)))
+
+(defn- apply-url-target-route!
+  [url-target]
+  (let [{:keys [to page-id block-id]} (:route url-target)]
+    (case to
+      :page
+      (route-handler/redirect-to-page! page-id)
+
+      :block
+      (route-handler/redirect-to-page! block-id)
+
+      nil)))
+
 (defn start!
   [render]
-
-  (idb/start)
-  (get-system-info)
-  (set-global-error-notification!)
-
-  (register-components-fns!)
-  (user-handler/restore-tokens-from-localstorage)
   (state/set-db-restoring! true)
-  (when (util/electron?)
-    (el/listen!))
-  (render)
-  (i18n/start)
-  (instrument/init)
+  (let [t1 (util/time-ms)
+        ui-ready (p/do!
+                  (idb/start)
+                  (get-system-info)
+                  (plugin-handler/setup!)
+                  (render))]
 
-  (-> (util/indexeddb-check?)
-      (p/catch (fn [_e]
-                 (notification/show! "Sorry, it seems that your browser doesn't support IndexedDB, we recommend to use latest Chrome(Chromium) or Firefox(Non-private mode)." :error false)
-                 (state/set-indexedb-support! false))))
+      (set-global-error-notification!)
 
-  (react/run-custom-queries-when-idle!)
+      (register-components-fns!)
+      (user-handler/restore-tokens-from-localstorage)
+      (user.login/setup-configure!)
+      (when (util/electron?)
+        (el/listen!))
 
-  (events/run!)
+      (i18n/start)
+      (instrument/init)
 
-  (log/info ::start-web-worker {})
+      (events/run!)
 
-  (p/do!
-   (-> (p/let [_ (db-browser/start-db-worker!)
-               repos (repo-handler/get-repos)
-               _ (state/set-repos! repos)
-               _ (mobile-util/hide-splash) ;; hide splash as early as ui is stable
-               repo (or (state/get-current-repo) (:url (first repos)))
-               _ (if (empty? repos)
-                   (repo-handler/new-db! config/demo-repo)
-                   (restore-and-setup! repo))]
-         (set-network-watcher!)
+      (log/info ::start-web-worker {})
 
-         (when (util/electron?)
-           (persist-db/run-export-periodically!))
-         (when (mobile-util/native-platform?)
-           (state/restore-mobile-theme!)))
-       (p/catch (fn [e]
-                  (js/console.error "Error while restoring repos: " e)))
-       (p/finally (fn []
-                    (state/set-db-restoring! false)
-                    (p/resolve! state/app-ready-promise true)
-                    (when-not (util/mobile?)
-                      (p/let [webgpu-available? (db-browser/<check-webgpu-available?)]
-                        (log/info :webgpu-available? webgpu-available?)
-                        (when webgpu-available?
-                          (p/do! (db-browser/start-inference-worker!)
-                                 (db-browser/<connect-db-worker-and-infer-worker!)
-                                 (reset! vector-search-flows/*infer-worker-ready true))))))))
-
-   (util/<app-wake-up-from-sleep-loop (atom false))
-
-   (when-not (util/mobile?)
-     (persist-var/load-vars))))
-
-(defn stop! []
-  (prn "stop!"))
+      (-> ui-ready
+          (p/then
+           (fn []
+             (p/let [t2 (util/time-ms)
+                     _ (persist-db/<start-runtime!)
+                     _ (log/info ::db-worker-spent-time (- (util/time-ms) t2))
+                     repos (repo-handler/get-repos)
+                     _ (state/set-repos! repos)
+                     _ (mobile-util/hide-splash) ;; hide splash as early as ui is stable
+                     url-target (current-url-target)
+                     registry (graph-handler/<get-graph-registry)
+                     target-repo (when (seq url-target)
+                                   (:repo (graph-handler/resolve-registry-target
+                                           (concat registry
+                                                   (graph-handler/registry-from-repo-summaries repos))
+                                           url-target)))
+                     _ (when (and (seq (:graph-id url-target)) (nil? target-repo))
+                         (log/warn :url-target/unresolved-graph-id url-target))
+                     repo (graph-handler/resolve-startup-repo
+                           registry
+                           repos
+                           url-target
+                           (graph-handler/get-tab-graph)
+                           (state/get-current-repo))
+                     _ (if (empty? repos)
+                         (repo-handler/new-db! config/demo-repo)
+                         (restore-and-setup! repo))
+                     _ (when target-repo
+                         (apply-url-target-route! url-target))]
+               (set-network-watcher!)
+               (when (mobile-util/native-platform?)
+                 (state/restore-mobile-theme!)))))
+          (p/catch (fn [e]
+                     (js/console.error "Error while restoring repos: " e)))
+          (p/finally (fn []
+                       (state/set-db-restoring! false)
+                       (p/resolve! state/app-ready-promise true)
+                       (log/info ::app-init-spent-time (- (util/time-ms) t1)))))))
 
 (defn quit-and-install-new-version!
   []

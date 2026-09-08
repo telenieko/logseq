@@ -2,10 +2,11 @@
   (:require
    ["remove-accents" :as remove-accents]
    [clojure.string :as string]
+   [frontend.components.icon :as icon-component]
+   [frontend.handler.block :as block-handler]
    [goog.string :as gstring]
-   [logseq.shui.hooks :as hooks]
    [logseq.shui.ui :as shui]
-   [rum.core :as rum]))
+   [io.factorhouse.hsx.core :as hsx]))
 
 (defn- to-string [input]
   (cond
@@ -17,11 +18,17 @@
     (nil? input) ""
     :else (pr-str input)))
 
+(defn- remove-accents*
+  [s]
+  (if-let [remove-fn (.-remove remove-accents)]
+    (remove-fn s)
+    (remove-accents s)))
+
 (defn- normalize-text [app-config text]
   (cond-> (to-string text)
     ;; :lower-case (string/lower-case)
     :normalize (.normalize "NFKC")
-    (:feature/enable-search-remove-accents? app-config) (remove-accents)))
+    (:feature/enable-search-remove-accents? app-config) (remove-accents*)))
 
 (defn highlight-query* [app-config query text]
   (cond
@@ -42,45 +49,60 @@
         (if (seq segs)
           (into [:span {"data-testid" text-string}]
                 (map-indexed (fn [i seg]
-                               (if (even? i)
-                                 [:span seg]
-                                 [:span {:class "ui__list-item-highlighted-span"} seg]))
+                               (with-meta
+                                 (if (even? i)
+                                   [:span seg]
+                                   [:mark {:style {:padding 0 :border-radius 0}} seg])
+                                 {:key (str "highlight-" i)}))
                              segs))
           [:span normal-text])))))
 
-(rum/defc root [{:keys [group icon icon-theme query text info shortcut value-label value
-                        title highlighted on-highlight on-highlight-dep header on-click hls-page?
-                        hoverable compact rounded on-mouse-enter component-opts source-page] :as _props
+(def current-page-badge-label "Current Page")
+
+(defn current-page-badge-placement
+  [{:keys [current-page? result-type]}]
+  (when current-page?
+    (case result-type
+      :page {:text-badge current-page-badge-label}
+      :block {:header-badge current-page-badge-label}
+      nil)))
+
+(defn current-page-badge-node
+  [label]
+  (when-not (string/blank? label)
+    [:span.cp__cmdk-current-page-badge label]))
+
+(hsx/defc root [{:keys [icon icon-theme query text info shortcut value-label value title highlighted header hoverable
+                        compact rounded on-mounted on-click on-mouse-move source-block hide-inline-icon?] :as props
                  :or {hoverable true rounded true}}
                 {:keys [app-config]}]
-  (let [ref (hooks/create-ref)
-        highlight-query (partial highlight-query* app-config query)
-        [hover? set-hover?] (rum/use-state false)]
-    (hooks/use-effect!
-     (fn []
-       (when (and highlighted on-highlight)
-         (on-highlight ref)))
-     [highlighted on-highlight-dep])
+  (let [highlight-query (partial highlight-query* app-config query)
+        badge-placement (current-page-badge-placement props)
+        text-badge (current-page-badge-node (:text-badge badge-placement))
+        header-badge (current-page-badge-node (:header-badge badge-placement))
+        keyboard-highlighted? (and highlighted (not hoverable))]
     [:div (merge
-           {:style {:opacity (if highlighted 1 0.8)}
-            :class (cond-> "flex flex-col transition-opacity"
-                     highlighted (str " !opacity-100 bg-gray-03-alpha dark:bg-gray-04-alpha")
-                     hoverable (str " transition-all duration-50 ease-in !opacity-75 hover:!opacity-100 hover:cursor-pointer hover:bg-gradient-to-r hover:from-gray-03-alpha hover:to-gray-01-alpha from-0% to-100%")
-                     (and hoverable rounded) (str " !rounded-lg")
+           {:style {:opacity 1}
+            :data-cmdk-item true
+            :data-hoverable (when hoverable true)
+            :data-highlighted (when highlighted true)
+            :data-kb-highlighted (when keyboard-highlighted? true)
+            :class (cond-> "flex flex-col transition-colors duration-75 ease-in"
+                     hoverable (str " cursor-pointer")
+                     rounded (str " rounded-lg")
                      (not compact) (str " py-4 px-6 gap-1")
-                     compact (str " py-1.5 px-3 gap-0.5")
-                     (not highlighted) (str " "))
-            :ref ref
+                     compact (str " py-1.5 px-3 gap-0.5"))
+            :ref (when on-mounted on-mounted)
             :on-click (when on-click on-click)
-            :on-mouse-over #(set-hover? true)
-            :on-mouse-out #(set-hover? false)
-            :on-mouse-enter (when on-mouse-enter on-mouse-enter)}
-           component-opts)
-     ;; header
+            :on-mouse-move (when on-mouse-move on-mouse-move)})
+     ;; header — single-line, overflow hidden so long paths don't push content off screen
      (when header
-       [:div.text-xs.pl-8.font-light {:class "-mt-1"
-                                      :style {:color "var(--lx-gray-11)"}}
-        (highlight-query header)])
+       [:div.text-xs.pl-8.font-light.flex.items-center.gap-2.overflow-hidden.min-w-0 {:class "-mt-1"
+                                                                        :style {:color "var(--lx-gray-11)"
+                                                                                :white-space "nowrap"
+                                                                                :text-overflow "ellipsis"}}
+        (highlight-query header)
+        header-badge])
      ;; main row
      [:div.flex.items-start.gap-3
       [:div.w-5.h-5.rounded.flex.items-center.justify-center
@@ -92,18 +114,19 @@
                                         (if highlighted "bg-accent-07-alpha" "bg-gray-05")
                                         " dark:text-white")
                  (= icon-theme :gray) (str " bg-gray-05 dark:text-white"))}
-       (shui/tabler-icon icon {:size "14" :class ""})]
+       (if (string? icon)
+         (shui/tabler-icon icon {:size "14" :class ""})
+         icon)]
       [:div.flex.flex-1.flex-col
        (when title
          [:div.text-sm.pb-2.font-bold.text-gray-11 (highlight-query title)])
-       [:div {:class "text-sm font-medium text-gray-12"}
-        (if (and (= group :pages) (not= text source-page))  ;; alias
-          [:div.flex.flex-row.items-center.gap-2
-           (highlight-query text)
-           (if-not hls-page?
-             [:<> [:div.opacity-50.font-normal "alias of"] source-page]
-             [:div.opacity-50.font-normal.text-xs " — Highlights page"])]
-          (highlight-query text))
+       [:div {:class "cp__cmdk-item-main-text text-sm font-medium text-gray-12 flex items-center gap-2 flex-wrap"}
+        (if hide-inline-icon?
+          (highlight-query text)
+          (block-handler/block-title-with-icon source-block
+                                               (highlight-query text)
+                                               icon-component/icon))
+        text-badge
         (when info
           [:span.text-xs.text-gray-11 " — " (highlight-query info)])]]
       (when (or value-label value)
@@ -115,6 +138,8 @@
          (when value
            [:span.text-gray-11 (to-string value)])])
       (when shortcut
-        [:div {:class "flex gap-1"
-               :style {:opacity (if (or highlighted hover?) 1 0.9)}}
-         (shui/shortcut shortcut)])]]))
+        [:div {:class "flex gap-1 shui-shortcut-row items-center"
+               :style {:opacity (if highlighted 1 0.9)
+                       :min-height "20px"
+                       :flex-wrap "nowrap"}}
+         (shui/shortcut shortcut {:aria-hidden? true})])]]))

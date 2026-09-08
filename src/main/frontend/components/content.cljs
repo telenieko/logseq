@@ -1,24 +1,28 @@
 (ns frontend.components.content
-  (:require [cljs-time.coerce :as tc]
-            [cljs.pprint :as pp]
+  (:require ["react" :as react]
             [clojure.string :as string]
-            [dommy.core :as d]
+            [electron.ipc :as ipc]
             [frontend.commands :as commands]
+            [frontend.components.block.comments-model :as comments-model]
             [frontend.components.editor :as editor]
             [frontend.components.export :as export]
+            [frontend.components.icon :as icon-component]
             [frontend.components.page-menu :as page-menu]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
-            [frontend.db :as db]
+            [frontend.db.hooks :as db-hooks]
+            [frontend.db.async :as db-async]
             [frontend.extensions.fsrs :as fsrs]
-            [frontend.extensions.srs :as srs]
             [frontend.handler.common.developer :as dev-common-handler]
+            [frontend.handler.comments :as comments-handler]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.graph :as graph-handler]
             [frontend.handler.notification :as notification]
-            [frontend.handler.page :as page-handler]
             [frontend.handler.property :as property-handler]
             [frontend.handler.property.util :as pu]
-            [frontend.modules.shortcut.core :as shortcut]
+            [frontend.handler.reaction :as reaction-handler]
+            [frontend.modules.shortcut.data-helper :as shortcut-dh]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
@@ -26,29 +30,66 @@
             [frontend.util.url :as url-util]
             [goog.dom :as gdom]
             [goog.object :as gobj]
+            [logseq.common.path :as path]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
+            [logseq.shui.popup.core :as shui-popup]
             [promesa.core :as p]
-            [rum.core :as rum]))
+            [io.factorhouse.hsx.core :as hsx]))
 
-;; TODO i18n support
-
-(rum/defc custom-context-menu-content
+(hsx/defc ^:large-vars/cleanup-todo custom-context-menu-content
   []
-  (let [repo (state/get-current-repo)
-        db-based? (config/db-based-graph? repo)]
+  (let [selection-block-ids (state/get-selection-block-ids)
+        [selected-blocks set-selected-blocks!] (hooks/use-state nil)
+        [set-icon-sub-menu-open? set-icon-sub-menu-open] (hooks/use-state false)
+        comment-targets (comments-model/comment-target-blocks
+                         selected-blocks)]
+    (hooks/use-effect!
+     (fn []
+       (p/let [results (db-async/<get-blocks (state/get-current-repo) selection-block-ids)]
+         (set-selected-blocks! (vec (keep :block results))))
+       nil)
+     [selection-block-ids])
     [:<>
-     (ui/menu-background-color #(property-handler/batch-set-block-property! repo
-                                                                            (state/get-selection-block-ids)
-                                                                            (pu/get-pid :logseq.property/background-color)
+     (ui/menu-background-color #(property-handler/batch-set-block-property! (state/get-selection-block-ids)
+                                                                            :logseq.property/background-color
                                                                             %)
-                               #(property-handler/batch-remove-block-property! repo
-                                                                               (state/get-selection-block-ids)
-                                                                               (pu/get-pid :logseq.property/background-color)))
+                               #(property-handler/batch-remove-block-property! (state/get-selection-block-ids)
+                                                                               :logseq.property/background-color))
      (ui/menu-heading #(editor-handler/batch-set-heading! (state/get-selection-block-ids) %)
                       #(editor-handler/batch-set-heading! (state/get-selection-block-ids) true)
                       #(editor-handler/batch-remove-heading! (state/get-selection-block-ids)))
+
+     (shui/dropdown-menu-sub
+      {:open set-icon-sub-menu-open?
+       :onOpenChange (fn [v event-details]
+                       (if (= (some-> (shui-popup/get-last-popup) :id) :icons-color-picker)
+                         (some-> event-details (.cancel))
+                         (do
+                           (swap! shui-popup/*opened-sub-menus (if v conj disj) :set-icon)
+                           (set-icon-sub-menu-open v))))}
+      (shui/dropdown-menu-sub-trigger
+       (t :context-menu/set-icon))
+      (shui/dropdown-menu-sub-content
+       [:div.p-1
+        (icon-component/icon-search
+         {:on-chosen (fn [_e icon]
+                       (let [block-ids (state/get-selection-block-ids)]
+                         (if icon
+                           (property-handler/batch-set-block-property!
+                            block-ids
+                            :logseq.property/icon
+                            (select-keys icon [:type :id :color]))
+                           (property-handler/batch-remove-block-property!
+                            block-ids
+                            :logseq.property/icon)))
+                       (state/hide-custom-context-menu!)
+                       (shui/popup-hide!))
+          :color-auto-chosen? false
+          :del-btn? true
+          :icon-value nil})]))
 
      (shui/dropdown-menu-separator)
 
@@ -56,7 +97,7 @@
       {:key "cut"
        :on-click #(editor-handler/cut-selection-blocks true)}
       (t :editor/cut)
-      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cut)))
+      (ui/dropdown-shortcut :editor/cut))
 
      (shui/dropdown-menu-item
       {:key "delete"
@@ -65,13 +106,13 @@
                       (shui/popup-hide!))}
 
       (t :editor/delete-selection)
-      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete)))
+      (ui/dropdown-shortcut :editor/delete))
 
      (shui/dropdown-menu-item
       {:key "copy"
        :on-click #(editor-handler/copy-selection-blocks true)}
-      (t :editor/copy)
-      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/copy)))
+      (t :ui/copy)
+      (ui/dropdown-shortcut :editor/copy))
 
      (shui/dropdown-menu-item
       {:key "copy as"
@@ -80,30 +121,33 @@
                           (let [block-uuids (state/get-selection-block-ids)]
                             (shui/popup-hide!)
                             (shui/dialog-open!
-                             #(export/export-blocks block-uuids {:whiteboard? false
-                                                                 :export-type :selected-nodes}))))}
-      (t :content/copy-export-as))
+                             #(export/export-blocks block-uuids {:export-type :selected-nodes}))))}
+      (t :export/copy-or-export-as))
 
      (shui/dropdown-menu-item
       {:key "copy block refs"
        :on-click editor-handler/copy-block-refs}
-      (t :content/copy-block-ref))
-
-     (when-not db-based?
-       (shui/dropdown-menu-item
-        {:key "copy block embeds"
-         :on-click editor-handler/copy-block-embeds}
-        (t :content/copy-block-emebed)))
+      (t :block/copy-ref))
 
      (shui/dropdown-menu-separator)
 
      (when (state/enable-flashcards?)
        (shui/dropdown-menu-item
         {:key "Make a Card"
-         :on-click #(if (config/db-based-graph? (state/get-current-repo))
-                      (fsrs/batch-make-cards!)
-                      (srs/batch-make-cards!))}
+         :on-click #(fsrs/batch-make-cards!)}
         (t :context-menu/make-a-flashcard)))
+
+     (when (seq comment-targets)
+       (shui/dropdown-menu-item
+         {:key "Add comment"
+          :on-click (fn [_e]
+                     (p/let [comments-area (comments-handler/ensure-comments-area-for-selected-blocks!
+                                            comment-targets)]
+                       (when comments-area
+                         (comments-handler/reveal-comments-area! comments-area))
+                       (state/hide-custom-context-menu!)
+                       (shui/popup-hide!)))}
+        (t :block.comments/add-comment)))
 
      (shui/dropdown-menu-item
       {:key "Toggle number list"
@@ -114,7 +158,7 @@
       {:key "cycle todos"
        :on-click editor-handler/cycle-todos!}
       (t :editor/cycle-todo)
-      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cycle-todo)))
+      (ui/dropdown-shortcut :editor/cycle-todo))
 
      (shui/dropdown-menu-separator)
 
@@ -124,7 +168,7 @@
                           (util/stop e)
                           (editor-handler/expand-all-selection!))}
       (t :editor/expand-block-children)
-      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/expand-block-children)))
+      (ui/dropdown-shortcut :editor/expand-block-children))
 
      (shui/dropdown-menu-item
       {:key "Collapse all"
@@ -132,137 +176,149 @@
                           (util/stop e)
                           (editor-handler/collapse-all-selection!))}
       (t :editor/collapse-block-children)
-      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/collapse-block-children)))]))
+      (ui/dropdown-shortcut :editor/collapse-block-children))]))
 
-(defonce *template-including-parent? (atom nil))
-
-(rum/defc template-checkbox
-  [template-including-parent?]
-  [:div.flex.flex-row.w-auto.items-center
-   [:p.text-medium.mr-2 (t :context-menu/template-include-parent-block)]
-   (ui/toggle template-including-parent?
-              #(swap! *template-including-parent? not))])
-
-(rum/defcs block-template < rum/reactive
-  shortcut/disable-all-shortcuts
-  (rum/local false ::edit?)
-  (rum/local "" ::input)
-  {:will-unmount (fn [state]
-                   (reset! *template-including-parent? nil)
-                   state)}
-  [state block-id]
-  (let [edit? (get state ::edit?)
-        input (get state ::input)
-        template-including-parent? (rum/react *template-including-parent?)
-        block-id (if (string? block-id) (uuid block-id) block-id)
-        block (db/entity [:block/uuid block-id])
-        has-children? (seq (:block/_parent block))
-        repo (state/get-current-repo)]
-    (when (and (nil? template-including-parent?) has-children?)
-      (reset! *template-including-parent? true))
-
-    (if @edit?
-      (let [submit! (fn []
-                      (let [title (string/trim @input)]
-                        (when (not (string/blank? title))
-                          (p/let [exists? (page-handler/<template-exists? title)]
-                            (if exists?
-                              (notification/show!
-                               [:p (t :context-menu/template-exists-warning)]
-                               :error)
-                              (p/do!
-                               (property-handler/set-block-property! repo block-id (pu/get-pid :logseq.property/template) title)
-                               (when (false? template-including-parent?)
-                                 (property-handler/set-block-property! repo block-id
-                                                                       (pu/get-pid :logseq.property/template-including-parent)
-                                                                       false))
-                               (shui/popup-hide!)))))))]
-        (state/clear-edit!)
-        [:<>
-         [:div.px-4.py-2.text-sm {:on-click (fn [e] (util/stop e))}
-          [:p (t :context-menu/input-template-name)]
-          [:input#new-template.form-input.block.w-full.sm:text-sm.sm:leading-5.my-2
-           {:auto-focus true
-            :on-key-down (fn [e]
-                           (util/stop-propagation e)
-                           (when (and (= "Enter" (util/ekey e))
-                                      (not (string/blank? (util/trim-safe @input))))
-                             (submit!)))
-            :on-change (fn [e]
-                         (reset! input (util/evalue e)))}]
-          (when has-children?
-            (template-checkbox template-including-parent?))
-          (ui/button (t :submit) :on-click submit!)]
-         (shui/dropdown-menu-separator)])
-      (shui/dropdown-menu-item
-       {:key "Make a Template"
-        :on-click (fn [e]
-                    (util/stop e)
-                    (reset! edit? true))}
-       (t :context-menu/make-a-template)))))
-
-(rum/defc ^:large-vars/cleanup-todo block-context-menu-content <
-  shortcut/disable-all-shortcuts
+(hsx/defc ^:large-vars/cleanup-todo block-context-menu-content
   [_target block-id property-default-value?]
-  (let [repo (state/get-current-repo)
-        db? (config/db-based-graph? repo)]
-    (when-let [block (db/entity [:block/uuid block-id])]
-      (let [heading (or (pu/lookup block :logseq.property/heading)
-                        false)]
-        [:<>
-         (ui/menu-background-color #(property-handler/set-block-property! repo block-id
-                                                                          (pu/get-pid :logseq.property/background-color)
-                                                                          %)
-                                   #(property-handler/remove-block-property! repo block-id
-                                                                             (pu/get-pid :logseq.property/background-color)))
+  (let [[block set-block!] (hooks/use-state nil)
+        simple-commands (rfx/use-sub [:plugin/simple-commands])
+        developer-mode? (rfx/use-sub [:ui/developer-mode?])
+        [set-icon-sub-menu-open? set-icon-sub-menu-open] (hooks/use-state false)
+        [heading set-heading!] (hooks/use-state false)
+        [current-color set-current-color!] (hooks/use-state (pu/lookup block :logseq.property/background-color))]
+    (hooks/use-effect!
+     (fn []
+       (p/let [block (db-async/<get-block (state/get-current-repo) block-id {:children? false})]
+         (set-block! block)
+         (set-heading! (or (pu/lookup block :logseq.property/heading) false))
+         (set-current-color! (pu/lookup block :logseq.property/background-color)))
+       nil)
+     [block-id])
+    (when block
+      [:<>
+       (ui/menu-background-color current-color
+                                 (fn [color]
+                                   (set-current-color! color)
+                                   (property-handler/set-block-property! block-id
+                                                                         :logseq.property/background-color
+                                                                         color))
+                                 (fn []
+                                   (set-current-color! nil)
+                                   (property-handler/remove-block-property! block-id
+                                                                            :logseq.property/background-color)))
 
-         (ui/menu-heading heading
-                          #(editor-handler/set-heading! block-id %)
-                          #(editor-handler/set-heading! block-id true)
-                          #(editor-handler/remove-heading! block-id))
+       (ui/menu-heading heading
+                        (fn [i]
+                          (set-heading! i)
+                          (editor-handler/set-heading! block-id i))
+                        (fn []
+                          (set-heading! true)
+                          (editor-handler/set-heading! block-id true))
+                        (fn []
+                          (set-heading! false)
+                          (editor-handler/remove-heading! block-id)))
 
          (shui/dropdown-menu-separator)
 
          (shui/dropdown-menu-item
-          {:key      "Open in sidebar"
+          {:key "Open in sidebar"
            :on-click (fn [_e]
                        (editor-handler/open-block-in-sidebar! block-id))}
-          (t :content/open-in-sidebar)
-          (shui/dropdown-menu-shortcut "⇧+click"))
+          (t :sidebar.right/open)
+          (ui/dropdown-shortcut "shift+click"))
+
+         (shui/dropdown-menu-item
+          {:key "Add comment"
+           :on-click (fn [_e]
+                       (p/let [comments-area (comments-handler/ensure-comments-area! block-id)]
+                         (comments-handler/reveal-comments-area! comments-area {:focus-editor? true})))}
+          (t :block.comments/add-comment))
+
+         (shui/dropdown-menu-sub
+          (shui/dropdown-menu-sub-trigger
+           (t :command.editor/add-reaction))
+          (shui/dropdown-menu-sub-content
+           [:div.p-1
+            (icon-component/icon-search
+             {:on-chosen (fn [_e icon]
+                           (let [emoji-id (:id icon)
+                                 emoji? (= :emoji (:type icon))]
+                             (if emoji?
+                               (do
+                                 (reaction-handler/toggle-reaction! block-id emoji-id)
+                                 (state/hide-custom-context-menu!)
+                                 (shui/popup-hide!))
+                               (notification/show! (t :block.reaction/emoji-required-warning) :warning))))
+              :tabs [[:emoji (t :icon/tab-emojis)]]
+              :default-tab :emoji
+              :show-used? true
+              :icon-value nil})]))
+
+         (shui/dropdown-menu-sub
+          {:open set-icon-sub-menu-open?
+           :onOpenChange (fn [v event-details]
+                           (if (= (some-> (shui-popup/get-last-popup) :id) :icons-color-picker)
+                             (some-> event-details (.cancel))
+                             (do
+                               (swap! shui-popup/*opened-sub-menus (if v conj disj) :set-icon)
+                               (set-icon-sub-menu-open v))))}
+          (shui/dropdown-menu-sub-trigger
+           (t :context-menu/set-icon))
+          (shui/dropdown-menu-sub-content
+           [:div.p-1
+            (let [icon-value (:logseq.property/icon block)]
+              (icon-component/icon-search
+               {:on-chosen (fn [_e icon]
+                             (if icon
+                               (property-handler/set-block-property!
+                                block-id
+                                :logseq.property/icon
+                                (select-keys icon [:type :id :color]))
+                               (property-handler/remove-block-property!
+                                block-id
+                                :logseq.property/icon))
+                             (state/hide-custom-context-menu!)
+                             (shui/popup-hide!))
+                :color-auto-chosen? false
+                :del-btn? (boolean icon-value)
+                :icon-value icon-value}))]))
 
          (shui/dropdown-menu-separator)
 
          (shui/dropdown-menu-item
-          {:key      "Copy block ref"
+          {:key "Copy block ref"
            :on-click (fn [_e]
                        (editor-handler/copy-block-ref! block-id ref/->block-ref))}
-          (t :content/copy-block-ref))
-
-         (when-not db?
-           (shui/dropdown-menu-item
-            {:key      "Copy block embed"
-             :on-click (fn [_e]
-                         (editor-handler/copy-block-ref! block-id #(util/format "{{embed ((%s))}}" %)))}
-            (t :content/copy-block-emebed)))
+          (t :block/copy-ref))
 
          ;; TODO Logseq protocol mobile support
          (when (util/electron?)
            (shui/dropdown-menu-item
-            {:key      "Copy block URL"
+            {:key "Copy block URL"
              :on-click (fn [_e]
-                         (let [current-repo (state/get-current-repo)
-                               tap-f (fn [block-id]
-                                       (url-util/get-logseq-graph-uuid-url nil current-repo block-id))]
+                         (let [tap-f (fn [block-id]
+                                       (url-util/get-logseq-web-block-url config/app-website
+                                                                         (graph-handler/current-graph-id)
+                                                                         block-id))]
                            (editor-handler/copy-block-ref! block-id tap-f)))}
-            (t :content/copy-block-url)))
+            (t :block/copy-url)))
+
+         (when (and (util/electron?) (ldb/asset? block))
+           (shui/dropdown-menu-item
+            {:key "Show asset in folder"
+             :on-click (fn [_e]
+                         (let [assets-dir (config/get-current-repo-assets-root)
+                               ext (name (:logseq.property.asset/type block))
+                               file-path (path/path-join assets-dir (str (:block/uuid block) "." ext))]
+                           (ipc/ipc "openFileInFolder" file-path)))}
+            (t :asset/show-file-in-folder)))
 
          (shui/dropdown-menu-item
-          {:key      "Copy as"
+          {:key "Copy as"
            :on-click (fn [_]
                        (shui/dialog-open!
-                        #(export/export-blocks [block-id] {:whiteboard? false
-                                                           :export-type :block})))}
-          (t :content/copy-export-as))
+                        #(export/export-blocks [block-id] {:export-type :block})))}
+          (t :export/copy-or-export-as))
 
          (when-not property-default-value?
            (shui/dropdown-menu-item
@@ -270,32 +326,22 @@
              :on-click (fn [_e]
                          (editor-handler/cut-block! block-id))}
             (t :editor/cut)
-            (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cut))))
+            (ui/dropdown-shortcut :editor/cut)))
 
          (when-not property-default-value?
            (shui/dropdown-menu-item
             {:key "delete"
              :on-click #(editor-handler/delete-block-aux! block)}
             (t :editor/delete-selection)
-            (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete))))
+            (ui/dropdown-shortcut :editor/delete)))
 
          (shui/dropdown-menu-separator)
 
-         (when-not db?
-           (block-template block-id))
-
          (cond
-           (srs/card-block? block)
-           (shui/dropdown-menu-item
-            {:key      "Preview Card"
-             :on-click #(srs/preview (:db/id block))}
-            (t :context-menu/preview-flashcard))
            (state/enable-flashcards?)
            (shui/dropdown-menu-item
-            {:key      "Make a Card"
-             :on-click #(if (config/db-based-graph? (state/get-current-repo))
-                          (fsrs/batch-make-cards! [block-id])
-                          (srs/batch-make-cards! [block-id]))}
+            {:key "Make a Card"
+             :on-click #(fsrs/batch-make-cards! [block-id])}
             (t :context-menu/make-a-flashcard))
            :else
            nil)
@@ -312,63 +358,45 @@
            :on-click (fn [_e]
                        (editor-handler/expand-all! block-id))}
           (t :editor/expand-block-children)
-          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/expand-block-children)))
+          (ui/dropdown-shortcut :editor/expand-block-children))
 
          (shui/dropdown-menu-item
           {:key "Collapse all"
            :on-click (fn [_e]
                        (editor-handler/collapse-all! block-id {}))}
           (t :editor/collapse-block-children)
-          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/collapse-block-children)))
+          (ui/dropdown-shortcut :editor/collapse-block-children))
 
-         (when (state/sub [:plugin/simple-commands])
+         (when simple-commands
            (when-let [cmds (state/get-plugins-commands-with-type :block-context-menu-item)]
              (for [[_ {:keys [key label] :as cmd} action pid] cmds]
                (shui/dropdown-menu-item
-                {:key      key
+                {:key key
                  :on-click #(commands/exec-plugin-simple-command!
                              pid (assoc cmd :uuid block-id) action)}
                 label))))
 
-         (when (state/sub [:ui/developer-mode?])
+         (when developer-mode?
            [:<>
             (shui/dropdown-menu-separator)
             (shui/dropdown-menu-sub
              (shui/dropdown-menu-sub-trigger
-              "Developer tools")
+              (t :context-menu/developer-tools))
 
              (shui/dropdown-menu-sub-content
               (shui/dropdown-menu-item
-               {:key "(Dev) Show block data"
+               {:key :dev/show-block-data
                 :on-click (fn []
                             (dev-common-handler/show-entity-data [:block/uuid block-id]))}
-               (t :dev/show-block-data))
-              (shui/dropdown-menu-item
-               {:key "(Dev) Show block AST"
-                :on-click (fn []
-                            (let [block (db/entity [:block/uuid block-id])]
-                              (dev-common-handler/show-content-ast (:block/title block)
-                                                                   (get block :block/format :markdown))))}
-               (t :dev/show-block-ast))
-              (shui/dropdown-menu-item
-               {:key "(Dev) Show block content history"
-                :on-click
-                (fn []
-                  (let [token (state/get-auth-id-token)
-                        graph-uuid (ldb/get-graph-rtc-uuid (db/get-db))]
-                    (p/let [blocks-versions (state/<invoke-db-worker :thread-api/rtc-get-block-content-versions token graph-uuid block-id)]
-                      (prn :Dev-show-block-content-history)
-                      (doseq [[block-uuid versions] blocks-versions]
-                        (prn :block-uuid block-uuid)
-                        (pp/print-table [:content :created-at]
-                                        (map (fn [version]
-                                               {:created-at (tc/from-long (* (:created-at version) 1000))
-                                                :content (:value version)})
-                                             versions))))))}
+               (shortcut-dh/shortcut-desc-by-id :dev/show-block-data))
+	              (shui/dropdown-menu-item
+	               {:key :dev/show-block-ast
+	                :on-click (fn []
+	                            (dev-common-handler/show-content-ast (:block/title block)
+	                                                                 (get block :block/format :markdown)))}
+	               (shortcut-dh/shortcut-desc-by-id :dev/show-block-ast))))])])))
 
-               "(Dev) Show block content history")))])]))))
-
-(rum/defc block-ref-custom-context-menu-content
+(hsx/defc block-ref-custom-context-menu-content
   [block block-ref-id]
   (when (and block block-ref-id)
     [:<>
@@ -379,46 +407,61 @@
                     (state/get-current-repo)
                     block-ref-id
                     :block-ref))}
-      (t :content/open-in-sidebar)
-      (shui/dropdown-menu-shortcut ["⇧+click"]))
+      (t :sidebar.right/open)
+      (ui/dropdown-shortcut "shift+click"))
      (shui/dropdown-menu-item
       {:key "copy"
        :on-click (fn [] (editor-handler/copy-current-ref block-ref-id))}
-      (t :content/copy-ref))
+      (t :reference/copy))
      (shui/dropdown-menu-item
       {:key "delete"
        :on-click (fn [] (editor-handler/delete-current-ref! block block-ref-id))}
-      (t :content/delete-ref))
+      (t :reference/delete))
      (shui/dropdown-menu-item
       {:key "replace-with-text"
        :on-click (fn [] (editor-handler/replace-ref-with-text! block block-ref-id))}
-      (t :content/replace-with-text))
+      (t :reference/replace-with-text))
      (shui/dropdown-menu-item
       {:key "replace-with-embed"
        :on-click (fn [] (editor-handler/replace-ref-with-embed! block block-ref-id))}
-      (t :content/replace-with-embed))]))
+      (t :reference/replace-with-embed))]))
 
-(rum/defc page-title-custom-context-menu-content
-  [page]
+(hsx/defc page-title-custom-context-menu-items
+  [page popup-id]
+  (let [favorited? (db-hooks/use-resource
+                    [:favorite-status (:block/uuid page)])
+        page-menu-options (page-menu/page-menu page favorited?)]
+    [:<>
+     (for [[idx {:keys [title options]}] (map-indexed vector page-menu-options)]
+       (let [on-click (:on-click options)
+             key (or (:key options) (str "page-menu-" idx))]
+         (react/cloneElement
+          (shui/dropdown-menu-item
+           (assoc options
+                  :on-click (fn [e]
+                              (when-not (false? (when on-click (on-click e)))
+                                (shui/popup-hide! popup-id))))
+           title)
+          #js {:key (str key)})))]))
+
+(hsx/defc page-title-custom-context-menu-content
+  [page popup-id]
   (when page
-    (let [page-menu-options (page-menu/page-menu page)]
-      [:<>
-       (for [{:keys [title options]} page-menu-options]
-         (shui/dropdown-menu-item options title))])))
+    (page-title-custom-context-menu-items page popup-id)))
 
 ;; TODO: content could be changed
 ;; Also, keyboard bindings should only be activated after
 ;; blocks were already selected.
-(rum/defc hiccup-content < rum/static
+(hsx/defc hiccup-content
   [id {:keys [hiccup]}]
   [:div {:id id}
    (if hiccup
      hiccup
-     [:div.cursor (t :content/click-to-edit)])])
+     [:div.cursor (t :editor/click-to-edit)])])
 
-(rum/defc non-hiccup-content
+(hsx/defc non-hiccup-content
   [id content on-click on-hide config format]
-  (let [edit? (state/sub-editing? id)]
+  (let [edit? (boolean (get (rfx/use-sub [:editor/editing?]) id))]
     (if edit?
       (editor/box {:on-hide on-hide
                    :format format}
@@ -435,34 +478,16 @@
          {:id id
           :on-click on-click}
          (if (string/blank? content)
-           [:div.cursor (t :content/click-to-edit)]
+           [:div.cursor (t :editor/click-to-edit)]
            content)]))))
 
-(defn- set-draw-iframe-style!
-  []
-  (let [width (gobj/get js/window "innerWidth")]
-    (when (>= width 1024)
-      (let [draws (d/by-class "draw-iframe")
-            width (- width 200)]
-        (doseq [draw draws]
-          (d/set-style! draw :width (str width "px"))
-          (let [height (max 700 (/ width 2))]
-            (d/set-style! draw :height (str height "px")))
-          (d/set-style! draw :margin-left (str (- (/ (- width 570) 2)) "px")))))))
-
-(rum/defcs content < rum/reactive
-  {:did-mount (fn [state]
-                (set-draw-iframe-style!)
-                state)
-   :did-update (fn [state]
-                 (set-draw-iframe-style!)
-                 state)}
-  [state id {:keys [format
-                    config
-                    hiccup
-                    on-click
-                    on-hide]
-             :as option}]
+(hsx/defc content
+  [id {:keys [format
+              config
+              hiccup
+              on-click
+              on-hide]
+       :as option}]
   (if hiccup
     [:div
      (hiccup-content id option)]

@@ -21,7 +21,7 @@
                   (:db/ident property-entity))))
 
 (defn private-built-in-page?
-  "Private built-in pages should not be navigable or searchable by users. Later it
+  "Private built-in pages should not be navigable, searchable or editable by users. Later it
    could be useful to use this for the All Pages view"
   [page]
   (cond (entity-util/property? page)
@@ -29,7 +29,7 @@
         (or (entity-util/class? page) (entity-util/internal-page? page))
         false
         ;; Default to true for closed value and future internal types.
-        ;; Other types like whiteboard are not considered because they aren't built-in
+        ;; Other types are not considered because they aren't built-in
         :else
         true))
 
@@ -57,12 +57,19 @@
 
 (defn get-class-title-with-extends
   [entity]
-  (let [parents' (->> (db-class/get-class-extends entity)
-                      (remove (fn [e] (= :logseq.class/Root (:db/ident e))))
-                      vec)]
-    (string/join
-     ns-util/parent-char
-     (map :block/title (conj parents' entity)))))
+  (let [extends (some->> (:logseq.property.class/extends entity)
+                         (remove (fn [extend]
+                                   (or (:logseq.property/built-in? extend)
+                                       (= (:block/title entity) (:block/title extend)))))
+                         vec)]
+    (if (seq extends)
+      (str (if (= 1 (count extends))
+             (:block/title (first extends))
+             (->> (take 2 extends)
+                  (map :block/title)
+                  (string/join " | ")))
+           ns-util/parent-char (:block/title entity))
+      (:block/title entity))))
 
 (defn get-title-with-parents
   [entity]

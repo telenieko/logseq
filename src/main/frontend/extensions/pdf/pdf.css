@@ -776,19 +776,17 @@ html[data-theme=dark] {
   }
 }
 
-.block-ref {
-  &-wrap {
-    &[data-hl-type=area] {
+.block-ref-wrap {
+  &[data-hl-type=area] {
+    display: block;
+
+    .block-ref {
       display: block;
+      border: none;
+    }
 
-      .block-ref {
-        display: block;
-        border: none;
-      }
-
-      .prefix-link > .hl-area {
-        cursor: alias;
-      }
+    .prefix-link > .hl-area {
+      cursor: alias;
     }
   }
 }
@@ -803,16 +801,15 @@ html[data-theme=dark] {
       &:before {
         content: "📌 ";
       }
+
+      &.as-block {
+        @apply inline-block;
+      }
     }
 
     [data-hl-type=area] {
-      .prefix-link {
-        @apply block mt-[1px];
-      }
 
       .hl-page {
-        @apply inline-flex justify-between w-[85%];
-
         > label {
           @apply flex-1 cursor-text;
         }
@@ -894,32 +891,29 @@ body[data-page] {
     z-index: 10;
   }
 
-  .extensions__pdf {
+  .extensions__pdf-viewer {
+    left: 0;
+    width: 100%;
+  }
 
-    &-viewer {
-      left: 0;
-      width: 100%;
-    }
+  .extensions__pdf-viewer-cnt {
+    @apply flex overflow-x-hidden;
+  }
 
-    &-viewer-cnt {
-      @apply flex overflow-x-hidden;
-    }
+  .extensions__pdf-highlights {
+    height: 30vh;
+    overflow: auto;
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background-color: rgba(231, 231, 231, 0.9);
+    padding: 20px;
+    z-index: 6;
+    max-width: 400px;
 
-    &-highlights {
-      height: 30vh;
-      overflow: auto;
-      position: absolute;
-      top: 20px;
-      left: 20px;
-      background-color: rgba(231, 231, 231, 0.9);
-      padding: 20px;
-      z-index: 6;
-      max-width: 400px;
-
-      pre {
-        white-space: pre-wrap;
-        font-size: 12px;
-      }
+    pre {
+      white-space: pre-wrap;
+      font-size: 12px;
     }
   }
 }
@@ -994,7 +988,7 @@ html.is-system-window {
   animation-name: hl-flash;
   animation-duration: 0.3s;
   animation-timing-function: ease;
-  animation-iteration-count: 2;
+  animation-iteration-count: 1;
   animation-direction: alternate;
   animation-play-state: running;
 }
@@ -1015,5 +1009,13 @@ html.is-system-window {
 .textLayer :is(span, br) {
   &::selection {
     @apply text-transparent;
+  }
+}
+
+.block-title-wrap[data-hl-type=area] {
+  @apply flex flex-col;
+
+  .prefix-link {
+    @apply inline-block;
   }
 }

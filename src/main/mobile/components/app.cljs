@@ -1,171 +1,80 @@
 (ns mobile.components.app
   "App root"
   (:require ["../externals.js"]
+            [frontend.config :as config]
             [frontend.components.journal :as journal]
+            [frontend.components.quick-add :as quick-add]
+            [frontend.context.i18n :as i18n :refer [t]]
             [frontend.handler.common :as common-handler]
+            [frontend.handler.db-based.sync :as rtc-handler]
+            [frontend.handler.editor :as editor-handler]
+            [frontend.handler.repo :as repo-handler]
             [frontend.handler.user :as user-handler]
-            [frontend.rum :as frum]
+            [frontend.extensions.fsrs :as fsrs]
+            [frontend.mobile.util :as mobile-util]
+            [frontend.rfx :as rfx]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [frontend.util.text :as text-util]
             [logseq.shui.dialog.core :as shui-dialog]
             [logseq.shui.hooks :as hooks]
             [logseq.shui.popup.core :as shui-popup]
-            [logseq.shui.silkhq :as silkhq]
             [logseq.shui.toaster.core :as shui-toaster]
             [logseq.shui.ui :as shui]
+            [mobile.bottom-tabs :as bottom-tabs]
             [mobile.components.editor-toolbar :as editor-toolbar]
+            [mobile.components.favorites :as favorites]
+            [mobile.components.graphs :as graphs]
             [mobile.components.header :as mobile-header]
-            [mobile.components.left-sidebar :as mobile-left-sidebar]
-            [mobile.components.modal :as modal]
             [mobile.components.popup :as popup]
-            [mobile.components.search :as search]
             [mobile.components.selection-toolbar :as selection-toolbar]
-            [mobile.components.settings :as settings]
-            [mobile.components.ui :as ui-component]
-            [mobile.components.ui-silk :as ui-silk]
             [mobile.state :as mobile-state]
-            [rum.core :as rum]))
+            [promesa.core :as p]
+            [io.factorhouse.hsx.core :as hsx]))
 
-(rum/defc keep-keyboard-open
-  []
-  [:input.absolute.top-4.left-0.w-1.h-1.opacity-0
-   {:id "app-keep-keyboard-open-input"
-    :auto-capitalize "off"
-    :auto-correct "false"}])
+(hsx/defc component-with-restoring
+  [component]
+  (let [db-restoring? (rfx/use-sub [:db/restoring?])]
+    (if db-restoring?
+      [:div.space-y-2.mt-8.mx-0.opacity-75
+       (shui/skeleton {:class "h-10 w-full mb-6"})
+       (shui/skeleton {:class "h-6 w-full"})
+       (shui/skeleton {:class "h-6 w-full"})]
+      component)))
 
-(defn- sidebar-not-allowed-to-open?
-  []
-  (or (seq @mobile-state/*modal-blocks)
-      (seq @mobile-state/*popup-data)
-      (:mobile/show-action-bar? @state/state)
-      (state/editing?)))
-
-(defn- setup-sidebar-touch-swipe!
-  []
-  (let [touch-start-x (atom 0)
-        touch-start-y (atom 0)
-        has-triggered? (atom false)
-        blocking-scroll? (atom false)
-        sidebar-initial-open? (atom false)
-        max-x (atom 0)
-        max-y (atom 0)
-        min-y (atom 0)
-        swipe-trigger-distance 50         ;; distance to actually open/close
-        horiz-intent-threshold 10         ;; start blocking scroll when horizontal intent is clear
-        max-vertical-drift 30
-        on-touch-start (fn [^js e]
-                         (when-not (sidebar-not-allowed-to-open?)
-                           (let [t (aget e "touches" 0)]
-                             (reset! sidebar-initial-open? (mobile-state/left-sidebar-open?))
-                             (reset! touch-start-x (.-pageX t))
-                             (reset! touch-start-y (.-pageY t))
-                             (reset! has-triggered? false)
-                             (reset! blocking-scroll? false)
-                             (reset! max-x 0)
-                             (reset! max-y (.-pageY t))
-                             (reset! min-y (.-pageY t)))))
-
-        on-touch-move (fn [^js e]
-                        (when-not (sidebar-not-allowed-to-open?)
-                          (let [t (aget e "touches" 0)
-                                _ (reset! max-x (max (.-pageX t) @max-x))
-                                _ (reset! max-y (max (.-pageY t) @max-y))
-                                _ (reset! min-y (min (.-pageY t) @min-y))
-                                dx (- (.-pageX t) @touch-start-x)
-                                dy (js/Math.abs (- @max-y @min-y))
-                                abs-dx (js/Math.abs dx)
-                                horizontal-intent (and (> abs-dx horiz-intent-threshold)
-                                                       (> abs-dx dy))
-                                open-swipe? (and (> dx swipe-trigger-distance)
-                                                 (< dy max-vertical-drift))
-                                close-swipe? (and (not @sidebar-initial-open?)
-                                                  (mobile-state/left-sidebar-open?)
-                                                  (> (- @max-x (.-pageX t)) swipe-trigger-distance)
-                                                  (< dy max-vertical-drift))]
-
-                             ;; Block vertical scroll as soon as horizontal intent is clear
-                            (when (or @blocking-scroll? (and horizontal-intent
-                                                             (not @sidebar-initial-open?)
-                                                             (mobile-state/left-sidebar-open?)))
-                              (reset! blocking-scroll? true)
-                              (.preventDefault e))
-
-                            (cond
-                              (and open-swipe? (not @has-triggered?))
-                              (do (reset! has-triggered? true)
-                                  (mobile-state/open-left-sidebar!))
-
-                              close-swipe?
-                              (mobile-state/close-left-sidebar!)))))
-
-        on-touch-end (fn [_]
-                       (reset! blocking-scroll? false))]
-
-    ;; passive:false so preventDefault works
-    (.addEventListener js/document "touchstart" on-touch-start #js {:passive false})
-    (.addEventListener js/document "touchmove"  on-touch-move  #js {:passive false})
-    (.addEventListener js/document "touchend"   on-touch-end   #js {:passive false})
-    (.addEventListener js/document "touchcancel" on-touch-end  #js {:passive false})
-
-    ;; cleanup
-    #(do
-       (.removeEventListener js/document "touchstart" on-touch-start)
-       (.removeEventListener js/document "touchmove"  on-touch-move)
-       (.removeEventListener js/document "touchend"   on-touch-end)
-       (.removeEventListener js/document "touchcancel" on-touch-end))))
-
-(rum/defc journals
+(hsx/defc home
   []
   (hooks/use-effect!
    (fn []
-     (setup-sidebar-touch-swipe!)) [])
-  (ui-component/classic-app-container-wrap
-   [:div.pt-3
-    (journal/all-journals)]))
-
-(rum/defc home-inner
-  [*page db-restoring? current-tab]
-  [:div {:id "app-main-content"
-         :ref *page}
-
-   ;; main content
-   (if db-restoring?
-     [:div.space-y-2.mt-8.mx-0.opacity-75
-      (shui/skeleton {:class "h-10 w-full mb-6 bg-gray-200"})
-      (shui/skeleton {:class "h-6 w-full bg-gray-200"})
-      (shui/skeleton {:class "h-6 w-full bg-gray-200"})]
-     (if (= current-tab "search")
-       [:div]
-       (journals)))])
-
-(rum/defc home < rum/reactive
-  {:did-mount (fn [state]
-                (ui/inject-document-devices-envs!)
-                state)}
-  [*page current-tab]
-  (let [db-restoring? (state/sub :db/restoring?)]
-    (home-inner *page db-restoring? current-tab)))
+     (ui/inject-document-devices-envs!))
+   [])
+  (component-with-restoring (journal/all-journals)))
 
 (defn use-theme-effects!
-  [current-repo]
-  (let [[theme] (frum/use-atom-in state/state :ui/theme)]
-    (hooks/use-effect!
-     (fn []
-       (state/sync-system-theme!)
-       (ui/setup-system-theme-effect!))
-     [])
-    (hooks/use-effect!
-     #(let [^js doc js/document.documentElement
-            ^js cls (.-classList doc)
-            ^js cls-body (.-classList js/document.body)]
-        (.setAttribute doc "data-theme" theme)
-        (if (= theme "dark")                               ;; for tailwind dark mode
-          (do (.add cls "dark") (.add cls "ion-palette-dark")
-              (doto cls-body (.remove "light-theme") (.add "dark-theme")))
-          (do (.remove cls "dark") (.remove cls "ion-palette-dark")
-              (doto cls-body (.remove "dark-theme") (.add "light-theme")))))
-     [theme]))
+  [current-repo theme]
+  (hooks/use-effect!
+   (fn []
+     (state/sync-system-theme!)
+     (ui/setup-system-theme-effect!)
+     (let [handler (fn [^js e]
+                     (when (:ui/system-theme? (state/get-state))
+                       (let [is-dark? (boolean (some-> e .-detail .-isDark))]
+                         (state/set-theme-mode! (if is-dark? "dark" "light") true))))]
+       (.addEventListener js/window "logseq:native-system-theme-changed" handler)
+       #(.removeEventListener js/window "logseq:native-system-theme-changed" handler)))
+   [])
+  (hooks/use-effect!
+   #(let [^js doc js/document.documentElement
+          ^js cls (.-classList doc)
+          ^js cls-body (.-classList js/document.body)]
+      (.setAttribute doc "data-theme" theme)
+      (if (= theme "dark")                               ;; for tailwind dark mode
+        (do (.add cls "dark")
+            (doto cls-body (.remove "light-theme") (.add "dark-theme")))
+        (do (.remove cls "dark")
+            (doto cls-body (.remove "dark-theme") (.add "light-theme")))))
+   [theme])
 
   (hooks/use-effect!
    (fn []
@@ -177,68 +86,289 @@
   (hooks/use-effect!
    (fn []
      (let [handle-size! (fn []
-                          (.setProperty (.-style js/document.body) "--ls-full-screen-height" (str js/window.screen.height "px")))]
+                          (.setProperty (.-style js/document.body)
+                                        "--ls-full-screen-height"
+                                        (str js/window.screen.height "px")))]
        (handle-size!)
        (.addEventListener js/window "orientationchange" handle-size!)
        #(.removeEventListener js/window "orientationchange" handle-size!)))
    []))
 
-(rum/defc app
-  [current-repo {:keys [login?]}]
-  (let [[tab] (mobile-state/use-tab)
-        *home (rum/use-ref nil)]
-    (use-screen-size-effects!)
-    (use-theme-effects! current-repo)
+(defn- safe-locale-date
+  [timestamp]
+  (when (number? timestamp)
+    (try
+      (i18n/locale-format-date (js/Date. timestamp))
+      (catch js/Error _e nil))))
+
+(defn- native-graph-action
+  [id title destructive? message]
+  {:id id
+   :title title
+   :destructive destructive?
+   :confirmTitle title
+   :confirmMessage message
+   :confirmButton (t :ui/confirm)
+   :cancelButton (t :ui/cancel)})
+
+(defn- native-graph-actions
+  [repos {:keys [url root remote? GraphUUID GraphSchemaVersion] :as graph}]
+  (let [graph-name (config/db-graph-name url)
+        warning (t :graph/delete-warning)
+        delete-message (fn [message] (str message "\n\n" warning))
+        delete-local? (repo-handler/removable-repo? graph repos)]
+    (cond-> []
+      (and root delete-local?)
+      (conj
+       (native-graph-action
+        "deleteLocal"
+        (t :graph/delete-local-action)
+        true
+        (delete-message (t :graph/delete-local-confirm-desc graph-name))))
+
+      (and remote?
+           GraphUUID
+           GraphSchemaVersion
+           (user-handler/manager? url))
+      (conj
+       (native-graph-action
+        "deleteRemote"
+        (t :graph/delete-server-action)
+        true
+        (delete-message (t :graph/delete-server-confirm-desc graph-name))))
+
+      (and remote?
+           GraphUUID
+           (not (user-handler/manager? url)))
+      (conj
+       (native-graph-action
+        "leaveRemote"
+        (t :graph/leave-action)
+        true
+        (t :graph/leave-confirm-desc))))))
+
+(defn- native-graph-item
+  [repos downloading-graph-id {:keys [url root remote? graph-e2ee?
+                                      GraphName GraphSchemaVersion GraphUUID
+                                      graph-ready-for-use? created-at last-seen-at]
+                               :as graph}]
+  (let [display-name (text-util/get-graph-name-from-path url)
+        time (safe-locale-date (or last-seen-at created-at))
+        downloading? (and downloading-graph-id (= GraphUUID downloading-graph-id))]
+    (when (seq display-name)
+      {:id (or GraphUUID url)
+       :url url
+       :displayName display-name
+       :subtitle (when time (t :graph/last-opened-at-label time))
+       :remote (boolean remote?)
+       :local (boolean root)
+       :readyForUse (not= false graph-ready-for-use?)
+       :downloading (boolean downloading?)
+       :e2ee (boolean graph-e2ee?)
+       :graphName GraphName
+       :graphUUID GraphUUID
+       :graphSchemaVersion GraphSchemaVersion
+       :actions (native-graph-actions repos graph)})))
+
+(defn- native-graph-sections
+  [repos remotes login? downloading-graph-id]
+  (let [repos (util/distinct-by :url repos)
+        repos (->> (if (and login? (seq remotes))
+                     (repo-handler/combine-local-&-remote-graphs repos remotes)
+                     repos)
+                   (util/distinct-by :url))
+        repos (cond->>
+               (remove #(= (:url %) config/demo-repo) repos)
+                true
+                (filter (fn [item]
+                          (config/db-based-graph? (:url item)))))
+        {remote-graphs true local-graphs false} (group-by (comp boolean :remote?) repos)
+        {own-graphs true shared-graphs false}
+        (group-by (fn [graph] (= "manager" (:graph<->user-user-type graph))) remote-graphs)
+        section (fn [id title refreshable? show-empty? graphs]
+                  (let [items (vec (keep #(native-graph-item repos downloading-graph-id %) graphs))]
+                    (when (or show-empty? (seq items))
+                      {:id id
+                       :title title
+                       :refreshable refreshable?
+                       :graphs items})))]
+    (vec
+     (keep identity
+           [(section "local" (t :graph/local-graphs) false true local-graphs)
+            (section "remote" (t :graph/remote-graphs) true false own-graphs)
+            (section "shared" (t :graph/shared-graphs) false false shared-graphs)]))))
+
+(defn- use-native-graphs-effects!
+  []
+  (let [id-token (rfx/use-sub [:auth/id-token])
+        repos (rfx/use-sub [:me :repos])
+        remotes (rfx/use-sub [:rtc/graphs])
+        downloading-graph-id (rfx/use-sub [:rtc/downloading-graph-uuid])
+        loading-graphs? (rfx/use-sub [:rtc/loading-graphs?])
+        route-match (rfx/use-sub [:route-match])
+        _preferred-language (rfx/use-sub [:preferred-language])
+        [tab] (hooks/use-atom mobile-state/*tab)
+        login? (boolean id-token)
+        route-name (get-in route-match [:data :name])
+        visible? (and (= tab "graphs")
+                      (not (contains? #{:import :export} route-name)))
+        sections (native-graph-sections repos remotes login? downloading-graph-id)
+        labels {:refresh (t :ui/refresh)
+                :preparing (t :graph/preparing)
+                :downloading (t :graph/downloading)}]
     (hooks/use-effect!
      (fn []
-       (when-let [element (util/mobile-page-scroll)]
-         (common-handler/listen-to-scroll! element))) [])
-    (silkhq/depth-sheet-stack
-     {:as-child true}
-     (silkhq/depth-sheet-scenery-outlets
-      (silkhq/scroll {:as-child true}
-                     (silkhq/scroll-view
-                      {:class "app-silk-index-scroll-view"
-                       :pageScroll true
-                       :nativePageScrollReplacement false}
-                      (silkhq/scroll-content
-                       {:class "app-silk-index-scroll-content"}
-                       [:div.app-silk-index-container
-                        {:data-tab (str tab)}
-                        (case (keyword tab)
-                          :home
-                          (home *home tab)
-                          :settings
-                          (settings/page)
-                          :search
-                          (search/search)
-                          "Not Found")])))
+       (when (and (mobile-util/native-ios?)
+                  login?
+                  (user-handler/rtc-group?))
+         (rtc-handler/<get-remote-graphs))
+       nil)
+     [login?])
+    (hooks/use-effect!
+     (fn []
+       (bottom-tabs/update-native-graphs! {:labels labels
+                                           :sections sections
+                                           :visible visible?
+                                           :refreshing (boolean loading-graphs?)})
+       nil)
+     [labels sections visible? loading-graphs?])))
 
-      (mobile-header/header tab login?)
-
-      (mobile-left-sidebar/left-sidebar)
-
-      ;; bottom tabs
-      (ui-silk/app-silk-tabs)
-
-      (keep-keyboard-open)
-      (ui-component/install-notifications)
-      (ui-component/install-modals)
-
-      (shui-toaster/install-toaster)
-      (shui-dialog/install-modals)
-      (shui-popup/install-popups)
-      (modal/blocks-modal)
-      (popup/popup)))))
-
-(rum/defc main < rum/reactive
+(hsx/defc native-graphs-bridge
   []
-  (let [current-repo (state/sub :git/current-repo)
-        login? (and (state/sub :auth/id-token)
-                    (user-handler/logged-in?))
-        show-action-bar? (state/sub :mobile/show-action-bar?)]
+  (use-native-graphs-effects!)
+  [:<>])
+
+(hsx/defc capture
+  []
+  (hooks/use-effect!
+   (fn []
+     (p/do!
+      (editor-handler/quick-add-ensure-new-block-exists!)
+      (when (mobile-util/native-ios?)
+        ;; FIXME: android doesn't open keyboard automatically
+        (editor-handler/quick-add-open-last-block!))))
+   [])
+  (quick-add/quick-add))
+
+(hsx/defc flashcards
+  []
+  (hooks/use-effect!
+   (fn []
+     (fsrs/update-due-cards-count))
+   [])
+  [:div.ls-mobile-flashcards
+   (fsrs/cards-view nil {:mobile? true
+                         :on-header-change mobile-state/set-flashcards-header!
+                         :on-selector-change mobile-state/set-flashcards-selector!})])
+
+(hsx/defc other-page
+  [route-view tab route-match]
+  (let [page-view? (= (get-in route-match [:data :name]) :page)]
+    [:div#main-content-container.pl-3.ls-layer
+     {:class (if page-view? "pr-2" "pr-3")}
+     (if route-view
+       (route-view route-match)
+       ;; NOTE: `case` caused IllegalArgumentException: Duplicate case test constant
+       (cond
+         (= tab "graphs") (when-not (mobile-util/native-ios?)
+                            (graphs/page))
+         (= tab "go to") (favorites/favorites)
+         (= tab "search") nil
+         (= tab "flashcards") (component-with-restoring (flashcards))
+         (= tab "capture") (component-with-restoring (capture))))]))
+
+(hsx/defc main-content
+  [tab route-match]
+  (let [view (get-in route-match [:data :view])
+        home? (and (= tab "home") (nil? view))
+        [quick-add-launched? set-quick-add-launched!] (hooks/use-state
+                                                       (= @mobile-state/*app-launch-url
+                                                          "logseq://mobile/go/quick-add"))]
+    (hooks/use-effect!
+     (fn []
+       (when (and (= tab "home") quick-add-launched?)
+         (set-quick-add-launched! false))
+       (fn []))
+     [tab])
+    ;; Two-layer structure:
+    ;; - Journals layer keeps its own scroll container and is always in the DOM.
+    ;; - Page/other-tab layer keeps its own independent scroll container.
+    ;; Both are absolutely positioned and stacked; we toggle visibility.
+    [:div.w-full.relative
+     ;; Journals scroll container (keep-alive)
+     [:div#app-main-home.pl-4.pr-3.absolute.inset-0
+      {:class (when-not home? "invisible pointer-events-none")}
+      (when-not quick-add-launched?
+        (home))]
+     ;; Other pages: search, settings, specific page, etc.
+     (when-not home?
+       (other-page view tab route-match))]))
+
+(hsx/defc app
+  [current-repo route-match]
+  (let [[tab] (mobile-state/use-tab)
+        preferred-language (rfx/use-sub [:preferred-language])
+        theme (rfx/use-sub [:ui/theme])]
+    (use-screen-size-effects!)
+    (use-theme-effects! current-repo theme)
+    (hooks/use-effect!
+     (fn []
+       (when (mobile-util/native-ios?)
+         (.requestAnimationFrame
+          js/window
+          (fn []
+            (.requestAnimationFrame
+             js/window
+             (fn []
+               (bottom-tabs/mark-tab-content-ready! tab))))))
+       nil)
+     [tab route-match])
+    (hooks/use-effect!
+     (fn []
+       (when-let [element (util/app-scroll-container-node)]
+         (common-handler/listen-to-scroll! element)))
+     [])
+    (hooks/use-effect!
+     (fn []
+       (when (mobile-util/native-platform?)
+         (bottom-tabs/configure)))
+     [preferred-language])
     [:<>
-     (app current-repo {:login? login?})
+     (mobile-header/header current-repo tab)
+     (main-content tab route-match)]))
+
+(defonce hidden-input
+  [:input
+   {:id mobile-util/mobile-keyboard-anchor-id
+    :type "text"}])
+
+(hsx/defc main
+  []
+  (let [current-repo (rfx/use-sub [:git/current-repo])
+        show-action-bar? (rfx/use-sub [:mobile/show-action-bar?])
+        [popup-data] (hooks/use-atom mobile-state/*popup-data)
+        [popup-presenting?] (hooks/use-atom mobile-state/*popup-presenting?)
+        {:keys [open? content-fn]} popup-data
+        show-popup? (and open? content-fn)
+        route-match (rfx/use-sub [:route-match])]
+    [:main#app-container-wrapper.ls-fold-button-on-right
+     [:div#app-container {:class (when (and show-popup? popup-presenting?) "invisible")}
+      [:div#main-container.flex.flex-1.overflow-x-hidden
+       (app current-repo route-match)]]
+     (when (mobile-util/native-ios?)
+       (native-graphs-bridge))
+     (when show-popup?
+       [:div.ls-layer {:class (when-not popup-presenting? "invisible")}
+        (popup/popup popup-data)])
      (editor-toolbar/mobile-bar)
      (when show-action-bar?
-       (selection-toolbar/action-bar))]))
+       (selection-toolbar/action-bar))
+     (shui-popup/install-popups)
+     (shui-toaster/install-toaster)
+     (shui-dialog/install-dialogs)
+     [:div.download
+      [:a#download.hidden]
+      [:a#download-as-transit-debug.hidden]
+      [:a#download-as-sqlite-db.hidden]
+      [:a#download-as-zip.hidden]]
+     hidden-input]))

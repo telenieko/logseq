@@ -182,6 +182,16 @@
        :logseq.property/hide? true
        :logseq.property/built-in? true})]))
 
+(defn- build-recycle-page
+  []
+  [(sqlite-util/block-with-timestamps
+    {:block/uuid (common-uuid/gen-uuid :builtin-block-uuid "Recycle")
+     :block/name (common-util/page-name-sanity-lc "Recycle")
+     :block/title "Recycle"
+     :block/tags [:logseq.class/Page]
+     :logseq.property/hide? true
+     :logseq.property/built-in? true})])
+
 (defn- build-favorites-page
   []
   [(sqlite-util/block-with-timestamps
@@ -207,12 +217,22 @@
     :file/path (str "logseq/" "custom.js")
     :file/content ""
     :file/created-at (js/Date.)
+    :file/last-modified-at (js/Date.)}
+   {:block/uuid (common-uuid/gen-uuid :builtin-block-uuid "logseq/publish.css")
+    :file/path (str "logseq/" "publish.css")
+    :file/content ""
+    :file/created-at (js/Date.)
+    :file/last-modified-at (js/Date.)}
+   {:block/uuid (common-uuid/gen-uuid :builtin-block-uuid "logseq/publish.js")
+    :file/path (str "logseq/" "publish.js")
+    :file/content ""
+    :file/created-at (js/Date.)
     :file/last-modified-at (js/Date.)}])
 
 (defn build-db-initial-data
   "Builds tx of initial data for a new graph including key values, initial files,
    built-in properties and built-in classes"
-  [config-content & {:keys [import-type graph-git-sha]}]
+  [config-content & {:keys [import-type graph-git-sha creating-remote-graph?]}]
   (assert (string? config-content))
   (let [initial-data (cond->
                       [(sqlite-util/kv :logseq.kv/db-type "db")
@@ -225,17 +245,23 @@
                        import-type
                        (into (sqlite-util/import-tx import-type))
                        graph-git-sha
-                       (conj (sqlite-util/kv :logseq.kv/graph-git-sha graph-git-sha)))
+                       (conj (sqlite-util/kv :logseq.kv/graph-git-sha graph-git-sha))
+                       creating-remote-graph?
+                       (conj (sqlite-util/kv :logseq.kv/graph-remote? creating-remote-graph?))
+                       true
+                       (conj (sqlite-util/kv :logseq.kv/local-graph-uuid
+                                             (uuid (str "00000000" (subs (str (common-uuid/gen-uuid)) 8))))))
         initial-files (build-initial-files config-content)
         {properties-tx :tx :keys [properties]} (build-initial-properties)
         db-ident->properties (zipmap (map :db/ident properties) properties)
         default-classes (build-initial-classes db-ident->properties)
         default-pages (->> (map sqlite-util/build-new-page built-in-pages-names)
                            (map mark-block-as-built-in))
-        hidden-pages (concat (build-initial-views) (build-favorites-page))
+        hidden-pages (concat (build-initial-views) (build-favorites-page) (build-recycle-page))
         ;; These classes bootstrap our tags and properties as they depend on each other e.g.
         ;; Root <-> Tag, classes-tx depends on logseq.property.class/extends, properties-tx depends on Property
-        bootstrap-class? (fn [c] (contains? #{:logseq.class/Root :logseq.class/Property :logseq.class/Tag :logseq.class/Template} (:db/ident c)))
+        bootstrap-class? (fn [c] (contains? #{:logseq.class/Root :logseq.class/Property :logseq.class/Tag
+                                              :logseq.class/Page :logseq.class/Template} (:db/ident c)))
         bootstrap-classes (filter bootstrap-class? default-classes)
         bootstrap-class-ids (map #(select-keys % [:db/ident :block/uuid]) bootstrap-classes)
         classes-tx (concat (map #(dissoc % :db/ident) bootstrap-classes)

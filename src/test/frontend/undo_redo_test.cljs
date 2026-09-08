@@ -1,77 +1,74 @@
 (ns frontend.undo-redo-test
-  (:require [clojure.test :as t :refer [deftest is testing use-fixtures]]
-            [datascript.core :as d]
-            [frontend.db :as db]
-            [frontend.modules.outliner.core-test :as outliner-test]
+  (:require [clojure.test :refer [deftest is]]
             [frontend.state :as state]
-            [frontend.test.fixtures :as fixtures]
-            [frontend.test.helper :as test-helper]
             [frontend.undo-redo :as undo-redo]
-            [frontend.worker.db-listener :as worker-db-listener]))
+            [frontend.util :as util]))
 
-;; TODO: random property ops test
+;; ADR 0013 note: this namespace keeps main-thread coordination coverage only.
+;; Worker-owned DB-history recording/replay tests belong under src/test/frontend/worker/.
 
-(def test-db test-helper/test-db)
+(deftest undo-redo-proxy-to-worker-test
+  (let [calls (atom [])
+        invoke! (fn [& args]
+                  (swap! calls conj (vec args))
+                  (vec args))
+        repo "repo-1"]
+    (with-redefs [util/node-test? false
+                  state/<invoke-db-worker invoke!]
+      (is (= [:thread-api/undo-redo-undo repo]
+             (undo-redo/undo repo)))
+      (is (= [:thread-api/undo-redo-redo repo]
+             (undo-redo/redo repo)))
+      (is (= [[:thread-api/undo-redo-undo repo]
+              [:thread-api/undo-redo-redo repo]]
+             @calls)))))
 
-(defmethod worker-db-listener/listen-db-changes :gen-undo-ops
-  [_ {:keys [repo]} tx-report]
-  (undo-redo/gen-undo-ops! repo
-                           (assoc-in tx-report [:tx-meta :client-id] (:client-id @state/state))))
+(deftest clear-history-and-record-editor-info-proxy-test
+  (let [calls (atom [])
+        invoke! (fn [& args]
+                  (swap! calls conj (vec args))
+                  (vec args))
+        repo "repo-2"
+        editor-info {:block-uuid (random-uuid)
+                     :container-id 1
+                     :start-pos 0
+                     :end-pos 3}]
+    (with-redefs [util/node-test? false
+                  state/<invoke-db-worker invoke!]
+      (is (= [:thread-api/undo-redo-clear-history repo]
+             (undo-redo/clear-history! repo)))
+      (is (= [:thread-api/undo-redo-record-editor-info repo editor-info]
+             (undo-redo/record-editor-info! repo editor-info)))
+      (is (= [[:thread-api/undo-redo-clear-history repo]
+              [:thread-api/undo-redo-record-editor-info repo editor-info]]
+             @calls)))))
 
-(defn listen-db-fixture
-  [f]
-  (let [test-db-conn (db/get-db test-db false)]
-    (assert (some? test-db-conn))
-    (worker-db-listener/listen-db-changes! test-db test-db-conn
-                                           {:handler-keys [:gen-undo-ops]})
-    (f)
-    (d/unlisten! test-db-conn :frontend.worker.db-listener/listen-db-changes!)))
+(deftest record-ui-state-proxy-test
+  (let [calls (atom [])
+        invoke! (fn [& args]
+                  (swap! calls conj (vec args))
+                  (vec args))
+        repo "repo-3"
+        ui-state-str "{:old-state {}, :new-state {:route-data {:to :page}}}"]
+    (with-redefs [util/node-test? false
+                  state/<invoke-db-worker invoke!]
+      (is (nil? (undo-redo/record-ui-state! repo nil)))
+      (is (= [:thread-api/undo-redo-record-ui-state repo ui-state-str]
+             (undo-redo/record-ui-state! repo ui-state-str)))
+      (is (= [[:thread-api/undo-redo-record-ui-state repo ui-state-str]]
+             @calls)))))
 
-(defn disable-browser-fns
-  [f]
-  ;; get-selection-blocks has a js/document reference
-  (with-redefs [state/get-selection-blocks (constantly [])]
-    (f)))
-
-(use-fixtures :each
-  disable-browser-fns
-  fixtures/react-components
-  fixtures/reset-db
-  listen-db-fixture)
-
-(defn- undo-all!
-  []
-  (loop [i 0]
-    (let [r (undo-redo/undo test-db)]
-      (if (not= :frontend.undo-redo/empty-undo-stack r)
-        (recur (inc i))
-        (prn :undo-count i)))))
-
-(defn- redo-all!
-  []
-  (loop [i 0]
-    (let [r (undo-redo/redo test-db)]
-      (if (not= :frontend.undo-redo/empty-redo-stack r)
-        (recur (inc i))
-        (prn :redo-count i)))))
-
-(defn- get-datoms
-  [db]
-  (set (map (fn [d] [(:e d) (:a d) (:v d)]) (d/datoms db :eavt))))
-
-(deftest ^:long undo-redo-test
-  (testing "Random mixed operations"
-    (set! undo-redo/max-stack-length 500)
-    (let [*random-blocks (atom (outliner-test/get-blocks-ids))]
-      (outliner-test/transact-random-tree!)
-      (let [conn (db/get-db false)
-            _ (outliner-test/run-random-mixed-ops! *random-blocks)
-            db-after @conn]
-
-        (undo-all!)
-
-        (is (= (get-datoms @conn) #{}))
-
-        (redo-all!)
-
-        (is (= (get-datoms @conn) (get-datoms db-after)))))))
+(deftest node-test-undo-redo-does-not-call-worker-test
+  (let [calls (atom [])
+        invoke! (fn [& args]
+                  (swap! calls conj (vec args))
+                  (vec args))
+        repo "repo-node"]
+    (with-redefs [util/node-test? true
+                  state/<invoke-db-worker invoke!]
+      (is (= :frontend.undo-redo/empty-undo-stack
+             (undo-redo/undo repo)))
+      (is (= :frontend.undo-redo/empty-redo-stack
+             (undo-redo/redo repo)))
+      (is (nil? (undo-redo/clear-history! repo)))
+      (is (empty? @calls)))))

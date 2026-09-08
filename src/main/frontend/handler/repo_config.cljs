@@ -4,13 +4,18 @@
   logseq/config.edn. In the future it may manage more files. This component
   depends on a repo."
   (:require [clojure.edn :as edn]
-            [frontend.db :as db]
+            [frontend.context.i18n :refer [t]]
             [frontend.handler.notification :as notification]
-            [frontend.state :as state]))
+            [frontend.state :as state]
+            [promesa.core :as p]))
+
+(defn <get-file-content
+  [repo-url path]
+  (state/<invoke-db-worker :thread-api/get-file-content repo-url path))
 
 (defn- get-repo-config-content
   [repo-url]
-  (db/get-file repo-url "logseq/config.edn"))
+  (<get-file-content repo-url "logseq/config.edn"))
 
 (defn read-repo-config
   "Converts file content to edn"
@@ -18,7 +23,7 @@
   (try
     (edn/read-string content)
     (catch :default e
-      (notification/show! "The file 'logseq/config.edn' is invalid. Please reload the app to in order to see the error and fix it." :error)
+      (notification/show! (t :file/config-invalid) :error)
       ;; Rethrow so we know how long this is an issue and to prevent downstream errors
       (throw e))))
 
@@ -32,7 +37,8 @@
 (defn restore-repo-config!
   "Sets repo config state from db"
   ([repo-url]
-   (restore-repo-config! repo-url (get-repo-config-content repo-url)))
+   (p/let [content (get-repo-config-content repo-url)]
+     (restore-repo-config! repo-url content)))
   ([repo-url config-content]
    (set-repo-config-state! repo-url config-content)))
 

@@ -1,112 +1,156 @@
 PODS:
-  - Capacitor (7.2.0):
+  - AparajitaCapacitorSecureStorage (8.0.0):
+    - Capacitor
+    - KeychainSwift (~> 21.0)
+  - Capacitor (8.3.1):
     - CapacitorCordova
-  - CapacitorActionSheet (7.0.1):
+  - CapacitorActionSheet (8.1.1):
     - Capacitor
-  - CapacitorApp (7.0.1):
+  - CapacitorApp (8.1.0):
     - Capacitor
-  - CapacitorCamera (7.0.1):
+  - CapacitorCamera (8.2.0):
     - Capacitor
-  - CapacitorClipboard (7.0.1):
+    - IONCameraLib (~> 1.0.4)
+  - CapacitorClipboard (8.0.1):
     - Capacitor
-  - CapacitorCommunitySafeArea (7.0.0-alpha.1):
+  - CapacitorCommunitySafeArea (8.0.1):
     - Capacitor
-  - CapacitorCordova (7.2.0)
-  - CapacitorDevice (7.0.2):
+  - CapacitorCordova (8.3.1)
+  - CapacitorDevice (8.0.2):
     - Capacitor
-  - CapacitorFilesystem (7.0.1):
+  - CapacitorDialog (8.0.1):
     - Capacitor
-  - CapacitorHaptics (7.0.1):
+  - CapacitorFilesystem (8.1.2):
     - Capacitor
-  - CapacitorKeyboard (7.0.1):
+    - IONFilesystemLib (~> 1.1.1)
+  - CapacitorHaptics (8.0.2):
     - Capacitor
-  - CapacitorNetwork (7.0.1):
+  - CapacitorKeyboard (8.0.3):
     - Capacitor
-  - CapacitorShare (7.0.1):
+  - CapacitorNetwork (8.0.1):
     - Capacitor
-  - CapacitorSplashScreen (7.0.1):
+  - CapacitorShare (8.0.1):
     - Capacitor
-  - CapacitorStatusBar (7.0.1):
+  - CapacitorSplashScreen (8.0.1):
     - Capacitor
-  - JcesarmobileSslSkip (0.4.0):
+  - CapacitorStatusBar (8.0.2):
     - Capacitor
+  - CapgoCapacitorNavigationBar (8.1.5):
+    - Capacitor
+  - Drops (1.7.0)
+  - IONCameraLib (1.0.4)
+  - IONFilesystemLib (1.1.2)
+  - JcesarmobileSslSkip (0.9.0):
+    - Capacitor
+  - KeychainSwift (21.0.0)
   - SendIntent (7.0.0):
     - Capacitor
 
 DEPENDENCIES:
-  - "Capacitor (from `../../node_modules/@capacitor/ios`)"
-  - "CapacitorActionSheet (from `../../node_modules/@capacitor/action-sheet`)"
-  - "CapacitorApp (from `../../node_modules/@capacitor/app`)"
-  - "CapacitorCamera (from `../../node_modules/@capacitor/camera`)"
-  - "CapacitorClipboard (from `../../node_modules/@capacitor/clipboard`)"
-  - "CapacitorCommunitySafeArea (from `../../node_modules/@capacitor-community/safe-area`)"
-  - "CapacitorCordova (from `../../node_modules/@capacitor/ios`)"
-  - "CapacitorDevice (from `../../node_modules/@capacitor/device`)"
-  - "CapacitorFilesystem (from `../../node_modules/@capacitor/filesystem`)"
-  - "CapacitorHaptics (from `../../node_modules/@capacitor/haptics`)"
-  - "CapacitorKeyboard (from `../../node_modules/@capacitor/keyboard`)"
-  - "CapacitorNetwork (from `../../node_modules/@capacitor/network`)"
-  - "CapacitorShare (from `../../node_modules/@capacitor/share`)"
-  - "CapacitorSplashScreen (from `../../node_modules/@capacitor/splash-screen`)"
-  - "CapacitorStatusBar (from `../../node_modules/@capacitor/status-bar`)"
-  - "JcesarmobileSslSkip (from `../../node_modules/@jcesarmobile/ssl-skip`)"
-  - SendIntent (from `../../node_modules/send-intent`)
+  - "AparajitaCapacitorSecureStorage (from `../../node_modules/.pnpm/@aparajita+capacitor-secure-storage@8.0.0/node_modules/@aparajita/capacitor-secure-storage`)"
+  - "Capacitor (from `../../node_modules/.pnpm/@capacitor+ios@8.3.1_@capacitor+core@8.3.1/node_modules/@capacitor/ios`)"
+  - "CapacitorActionSheet (from `../../node_modules/.pnpm/@capacitor+action-sheet@8.1.1_@capacitor+core@8.3.1/node_modules/@capacitor/action-sheet`)"
+  - "CapacitorApp (from `../../node_modules/.pnpm/@capacitor+app@8.1.0_@capacitor+core@8.3.1/node_modules/@capacitor/app`)"
+  - "CapacitorCamera (from `../../node_modules/.pnpm/@capacitor+camera@8.2.0_@capacitor+core@8.3.1/node_modules/@capacitor/camera`)"
+  - "CapacitorClipboard (from `../../node_modules/.pnpm/@capacitor+clipboard@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/clipboard`)"
+  - "CapacitorCommunitySafeArea (from `../../node_modules/.pnpm/@capacitor-community+safe-area@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor-community/safe-area`)"
+  - "CapacitorCordova (from `../../node_modules/.pnpm/@capacitor+ios@8.3.1_@capacitor+core@8.3.1/node_modules/@capacitor/ios`)"
+  - "CapacitorDevice (from `../../node_modules/.pnpm/@capacitor+device@8.0.2_@capacitor+core@8.3.1/node_modules/@capacitor/device`)"
+  - "CapacitorDialog (from `../../node_modules/.pnpm/@capacitor+dialog@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/dialog`)"
+  - "CapacitorFilesystem (from `../../node_modules/.pnpm/@capacitor+filesystem@8.1.2_@capacitor+core@8.3.1/node_modules/@capacitor/filesystem`)"
+  - "CapacitorHaptics (from `../../node_modules/.pnpm/@capacitor+haptics@8.0.2_@capacitor+core@8.3.1/node_modules/@capacitor/haptics`)"
+  - "CapacitorKeyboard (from `../../node_modules/.pnpm/@capacitor+keyboard@8.0.3_@capacitor+core@8.3.1/node_modules/@capacitor/keyboard`)"
+  - "CapacitorNetwork (from `../../node_modules/.pnpm/@capacitor+network@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/network`)"
+  - "CapacitorShare (from `../../node_modules/.pnpm/@capacitor+share@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/share`)"
+  - "CapacitorSplashScreen (from `../../node_modules/.pnpm/@capacitor+splash-screen@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/splash-screen`)"
+  - "CapacitorStatusBar (from `../../node_modules/.pnpm/@capacitor+status-bar@8.0.2_@capacitor+core@8.3.1/node_modules/@capacitor/status-bar`)"
+  - "CapgoCapacitorNavigationBar (from `../../node_modules/.pnpm/@capgo+capacitor-navigation-bar@8.1.5_@capacitor+core@8.3.1/node_modules/@capgo/capacitor-navigation-bar`)"
+  - Drops (from `https://github.com/omaralbeik/Drops.git`, tag `1.7.0`)
+  - "JcesarmobileSslSkip (from `../../node_modules/.pnpm/@jcesarmobile+ssl-skip@0.9.0/node_modules/@jcesarmobile/ssl-skip`)"
+  - "SendIntent (from `../../node_modules/.pnpm/send-intent@7.0.0_@capacitor+core@8.3.1/node_modules/send-intent`)"
+
+SPEC REPOS:
+  trunk:
+    - IONCameraLib
+    - IONFilesystemLib
+    - KeychainSwift
 
 EXTERNAL SOURCES:
+  AparajitaCapacitorSecureStorage:
+    :path: "../../node_modules/.pnpm/@aparajita+capacitor-secure-storage@8.0.0/node_modules/@aparajita/capacitor-secure-storage"
   Capacitor:
-    :path: "../../node_modules/@capacitor/ios"
+    :path: "../../node_modules/.pnpm/@capacitor+ios@8.3.1_@capacitor+core@8.3.1/node_modules/@capacitor/ios"
   CapacitorActionSheet:
-    :path: "../../node_modules/@capacitor/action-sheet"
+    :path: "../../node_modules/.pnpm/@capacitor+action-sheet@8.1.1_@capacitor+core@8.3.1/node_modules/@capacitor/action-sheet"
   CapacitorApp:
-    :path: "../../node_modules/@capacitor/app"
+    :path: "../../node_modules/.pnpm/@capacitor+app@8.1.0_@capacitor+core@8.3.1/node_modules/@capacitor/app"
   CapacitorCamera:
-    :path: "../../node_modules/@capacitor/camera"
+    :path: "../../node_modules/.pnpm/@capacitor+camera@8.2.0_@capacitor+core@8.3.1/node_modules/@capacitor/camera"
   CapacitorClipboard:
-    :path: "../../node_modules/@capacitor/clipboard"
+    :path: "../../node_modules/.pnpm/@capacitor+clipboard@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/clipboard"
   CapacitorCommunitySafeArea:
-    :path: "../../node_modules/@capacitor-community/safe-area"
+    :path: "../../node_modules/.pnpm/@capacitor-community+safe-area@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor-community/safe-area"
   CapacitorCordova:
-    :path: "../../node_modules/@capacitor/ios"
+    :path: "../../node_modules/.pnpm/@capacitor+ios@8.3.1_@capacitor+core@8.3.1/node_modules/@capacitor/ios"
   CapacitorDevice:
-    :path: "../../node_modules/@capacitor/device"
+    :path: "../../node_modules/.pnpm/@capacitor+device@8.0.2_@capacitor+core@8.3.1/node_modules/@capacitor/device"
+  CapacitorDialog:
+    :path: "../../node_modules/.pnpm/@capacitor+dialog@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/dialog"
   CapacitorFilesystem:
-    :path: "../../node_modules/@capacitor/filesystem"
+    :path: "../../node_modules/.pnpm/@capacitor+filesystem@8.1.2_@capacitor+core@8.3.1/node_modules/@capacitor/filesystem"
   CapacitorHaptics:
-    :path: "../../node_modules/@capacitor/haptics"
+    :path: "../../node_modules/.pnpm/@capacitor+haptics@8.0.2_@capacitor+core@8.3.1/node_modules/@capacitor/haptics"
   CapacitorKeyboard:
-    :path: "../../node_modules/@capacitor/keyboard"
+    :path: "../../node_modules/.pnpm/@capacitor+keyboard@8.0.3_@capacitor+core@8.3.1/node_modules/@capacitor/keyboard"
   CapacitorNetwork:
-    :path: "../../node_modules/@capacitor/network"
+    :path: "../../node_modules/.pnpm/@capacitor+network@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/network"
   CapacitorShare:
-    :path: "../../node_modules/@capacitor/share"
+    :path: "../../node_modules/.pnpm/@capacitor+share@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/share"
   CapacitorSplashScreen:
-    :path: "../../node_modules/@capacitor/splash-screen"
+    :path: "../../node_modules/.pnpm/@capacitor+splash-screen@8.0.1_@capacitor+core@8.3.1/node_modules/@capacitor/splash-screen"
   CapacitorStatusBar:
-    :path: "../../node_modules/@capacitor/status-bar"
+    :path: "../../node_modules/.pnpm/@capacitor+status-bar@8.0.2_@capacitor+core@8.3.1/node_modules/@capacitor/status-bar"
+  CapgoCapacitorNavigationBar:
+    :path: "../../node_modules/.pnpm/@capgo+capacitor-navigation-bar@8.1.5_@capacitor+core@8.3.1/node_modules/@capgo/capacitor-navigation-bar"
+  Drops:
+    :git: https://github.com/omaralbeik/Drops.git
+    :tag: 1.7.0
   JcesarmobileSslSkip:
-    :path: "../../node_modules/@jcesarmobile/ssl-skip"
+    :path: "../../node_modules/.pnpm/@jcesarmobile+ssl-skip@0.9.0/node_modules/@jcesarmobile/ssl-skip"
   SendIntent:
-    :path: "../../node_modules/send-intent"
+    :path: "../../node_modules/.pnpm/send-intent@7.0.0_@capacitor+core@8.3.1/node_modules/send-intent"
+
+CHECKOUT OPTIONS:
+  Drops:
+    :git: https://github.com/omaralbeik/Drops.git
+    :tag: 1.7.0
 
 SPEC CHECKSUMS:
-  Capacitor: 106e7a4205f4618d582b886a975657c61179138d
-  CapacitorActionSheet: 24609588961cc27c87e8b033be92b5eee65b5d4c
-  CapacitorApp: d63334c052278caf5d81585d80b21905c6f93f39
-  CapacitorCamera: eb8687d8687fed853598ec9460d94bcd5e16babe
-  CapacitorClipboard: b98aead5dc7ec595547fc2c5d75bacd2ae3338bc
-  CapacitorCommunitySafeArea: cc370b4f8d4aa340e4616acef9b73eda41ba0914
-  CapacitorCordova: 5967b9ba03915ef1d585469d6e31f31dc49be96f
-  CapacitorDevice: a50a45f0d075e55e2392c7a4be5404d4f69515de
-  CapacitorFilesystem: 307f97c27a265edf8396a1c9c235592fd8572fe3
-  CapacitorHaptics: 70e47470fa1a6bd6338cd102552e3846b7f9a1b3
-  CapacitorKeyboard: 969647d0ca2e5c737d7300088e2517aa832434e2
-  CapacitorNetwork: 07ec4c69c1bb696f41c23e00d31bda1bbb221bba
-  CapacitorShare: 58d6c2da63b093e8693287b2d36db92435538435
-  CapacitorSplashScreen: 19cd3573e57507e02d6f34597a8c421e00931487
-  CapacitorStatusBar: 275cbf2f4dfc00388f519ef80c7ec22edda342c9
-  JcesarmobileSslSkip: b0f921e9d397a57f7983731209ca1ee244119c1f
-  SendIntent: 1f4f65c7103eb423067c566682dfcda973b5fb29
+  AparajitaCapacitorSecureStorage: 8128d05cafcb13b00448e20fb388a0edccd44b12
+  Capacitor: 46dbaa89c1d1cd121b9fc2dc839c1f39cc49e326
+  CapacitorActionSheet: c3394c32eb29990e73e9c6c5677e3b31eb46ad3f
+  CapacitorApp: 449ffe26375e96f8aaaee625ac6e01e5c57c8650
+  CapacitorCamera: 8f6acf83664118321111e76acef86390211ccb08
+  CapacitorClipboard: c75fdaa6e622111119f35e7914ecfc67b05efecb
+  CapacitorCommunitySafeArea: 91738f4ae7f47d2d94e06e429e16fb73cd8fdc48
+  CapacitorCordova: 9010447fe25e869705fcf525e5f490facde87608
+  CapacitorDevice: 14cba6f88d1c3074cbf825fea977c8c526453ff8
+  CapacitorDialog: 854c5dac405081cae697c177ca43bcaa95ae67bf
+  CapacitorFilesystem: 2db285a1ac6e475cc27cae2e1bea999000f9e2be
+  CapacitorHaptics: 296f771ecd89c7a1bd92a7b6826a7d268e2e70f5
+  CapacitorKeyboard: 31c8285d92c9d1410071d52449f16d2c6673b6f4
+  CapacitorNetwork: 8812ce60d11fb63d8f2e4ba51a49b2e59892ebe2
+  CapacitorShare: 0c58305114538568059bfc07111f22dcb9cb2a82
+  CapacitorSplashScreen: 4b46c72298db552b3c57ce021ef028b6dc7f1fa7
+  CapacitorStatusBar: 01d5763b4ed720de5ce2edbc938de6a98f4c8f32
+  CapgoCapacitorNavigationBar: fa8161edfef5a03b8fd551d962b6c5af45ad393e
+  Drops: 5155b9ede54a2666b2129ac33f0734509b9f0784
+  IONCameraLib: f2349804460bd9e3f892e42109b8d996ab3fa19d
+  IONFilesystemLib: 21a63377696b2d8fab5632ecfb7d2ac67bddb68a
+  JcesarmobileSslSkip: 0177378ba3aaa93bb02cb287f1363d5ca2c24fef
+  KeychainSwift: 4a71a45c802fd9e73906457c2dcbdbdc06c9419d
+  SendIntent: 8a6f646a4489f788d253ffbd1082a98ea388d870
 
-PODFILE CHECKSUM: cb9c70caa3eda97256a3dae9041478673def76cd
+PODFILE CHECKSUM: cbe0ea6549f3dd4fc86276229afae9a13b3fc09c
 
 COCOAPODS: 1.16.2

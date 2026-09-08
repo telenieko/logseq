@@ -1,11 +1,11 @@
 (ns logseq.db.common.sqlite
-  "Provides common sqlite util fns for file and DB graphs. These fns work on
-  browser and node"
+  "Provides common sqlite util fns that work on browser and node"
   (:require ["path" :as node-path]
             [clojure.string :as string]
             [datascript.core :as d]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.common.config :as common-config]))
+            [logseq.common.graph-dir :as graph-dir]
+            [logseq.common.path :as path]
+            [logseq.db.sqlite.util :as sqlite-util]))
 
 (defn create-kvs-table!
   "Creates a sqlite table for use with datascript.storage if one doesn't exist"
@@ -18,25 +18,21 @@
   (or (d/restore-conn storage)
       (d/create-conn schema {:storage storage})))
 
-(defn local-file-based-graph?
-  [s]
-  (and (string? s)
-       (string/starts-with? s common-config/file-version-prefix)))
-
 (defn sanitize-db-name
   [db-name]
-  (if (string/starts-with? db-name common-config/file-version-prefix)
-    (-> db-name
-        (string/replace ":" "+3A+")
-        (string/replace "/" "++"))
-    (-> db-name
-        (string/replace sqlite-util/db-version-prefix "")
-        (string/replace "/" "_")
-        (string/replace "\\" "_")
-        (string/replace ":" "_"))));; windows
+  (-> db-name
+      (string/replace sqlite-util/db-version-prefix "")
+      (string/replace "/" "_")
+      (string/replace "\\" "_")
+      (string/replace ":" "_")));; windows
 
 (defn get-db-full-path
   [graphs-dir db-name]
-  (let [db-name' (sanitize-db-name db-name)
-        graph-dir (node-path/join graphs-dir db-name')]
-    [db-name' (node-path/join graph-dir "db.sqlite")]))
+  (let [graph-dir-name (graph-dir/repo->encoded-graph-dir-name db-name)
+        graph-dir (node-path/join graphs-dir graph-dir-name)]
+    [graph-dir-name (path/path-join graph-dir "db.sqlite")]))
+
+(defn get-db-backups-path
+  [graphs-dir db-name]
+  (let [graph-dir-name (graph-dir/repo->encoded-graph-dir-name db-name)]
+    (path/path-join graphs-dir graph-dir-name "backups")))

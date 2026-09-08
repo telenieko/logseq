@@ -1,5 +1,6 @@
 (ns frontend.mobile.intent
-  (:require ["@capacitor/action-sheet" :refer [ActionSheet]]
+  (:require ["/frontend/utils" :as utils]
+            ["@capacitor/action-sheet" :refer [ActionSheet]]
             ["@capacitor/filesystem" :refer [Filesystem]]
             ["@capacitor/share" :refer [^js Share]]
             ["path" :as node-path]
@@ -8,32 +9,59 @@
             [clojure.set :as set]
             [clojure.string :as string]
             [frontend.config :as config]
+            [frontend.context.i18n :refer [interpolate-rich-text-node t]]
             [frontend.date :as date]
-            [frontend.db :as db]
+            [frontend.db.async :as db-async]
             [frontend.handler.assets :as assets-handler]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.notification :as notification]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.util :as util]
-            [frontend.util.fs :as fs-util]
-            [frontend.util.ref :as ref]
             [goog.string :as gstring]
             [lambdaisland.glogi :as log]
-            [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
             [promesa.core :as p]))
+
+(defn- normalize-native-file-path
+  "Normalize iOS shared file URLs to paths that Capacitor Filesystem can read.
+  iOS share extensions commonly provide `file://` URLs."
+  [url]
+  (let [url (some-> url common-util/safe-decode-uri-component)]
+    (cond
+      (string/blank? url)
+      url
+
+      (string/starts-with? url "file://")
+      (subs url (count "file://"))
+
+      ;; Some Capacitor APIs may provide `_capacitor_file_` URLs.
+      (string/starts-with? url "capacitor://localhost/_capacitor_file_")
+      (string/replace url "capacitor://localhost/_capacitor_file_" "")
+
+      :else
+      url)))
+
+(defn- <filesystem-read-file
+  [url]
+  (let [path (normalize-native-file-path url)]
+    (-> (.readFile Filesystem #js {:path path})
+        (p/catch (fn [error]
+                   ;; Fallback to the original string for older plugin versions.
+                   (if (= path url)
+                     (p/rejected error)
+                     (.readFile Filesystem #js {:path url})))))))
 
 (defn open-or-share-file
   "Share file to mobile platform"
   [uri]
-  (p/let [options [{:title "Open"
+  (p/let [options [{:title (t :ui/open)
                     :style "DEFAULT"}
-                   {:title "Share"}
-                   {:title "Cancel"
+                   {:title (t :mobile.intent/share)}
+                   {:title (t :ui/cancel)
                     :style "CANCEL"}]
-          result (.showActions ActionSheet (clj->js {:title "File Options"
-                                                     :message "Select an option to perform"
+          result (.showActions ActionSheet (clj->js {:title (t :mobile.intent/file-options)
+                                                     :message (t :mobile.intent/select-option-prompt)
                                                      :options options}))
           index (.-index result)]
 
@@ -41,8 +69,8 @@
       (if (and (= index 0) (mobile-util/native-android?))
         (.openFile mobile-util/folder-picker (clj->js {:uri uri}))
         (.share Share (clj->js {:url uri
-                                :dialogTitle "Open file with your favorite app"
-                                :title "Open file with your favorite app"}))))))
+                                :dialogTitle (t :mobile.intent/open-with-app)
+                                :title (t :mobile.intent/open-with-app)}))))))
 
 (defn- is-link
   [url]
@@ -85,56 +113,29 @@
 
 (defn- embed-asset-file [url _format]
   (p/let [basename (node-path/basename url)
-          file (.readFile Filesystem #js {:path url})
+          file (<filesystem-read-file url)
           file-base64-str (some-> file (.-data))
-          file (some-> file-base64-str (util/base64string-to-unit8array)
+          file (some-> file-base64-str (utils/base64ToUint8Array)
                        (vector) (clj->js) (js/File. basename #js {}))
           result (editor-handler/db-based-save-assets!
                   (state/get-current-repo) [file] {})]
     (first result)))
 
-(defn- embed-text-file
-  "Store external content with url into Logseq repo"
-  [url title]
-  (p/let [time (date/get-current-time)
-          date-ref-name (date/today)
-          title (some-> (or title (node-path/basename url))
-                        common-util/safe-decode-uri-component
-                        util/node-path.name
-                        ;; make the title more user friendly
-                        common-util/page-name-sanity)
-          path (node-path/join (config/get-repo-dir (state/get-current-repo))
-                               (config/get-pages-directory)
-                               (str (js/encodeURI (fs-util/file-name-sanity title :markdown)) (node-path/extname url)))
-          _ (p/catch
-             (.copy Filesystem (clj->js {:from url :to path}))
-             (fn [error]
-               (log/error :copy-file-error {:error error})))
-          url (ref/->page-ref title)
-          template (get-in (state/get-config)
-                           [:quick-capture-templates :text]
-                           "**{time}** [[quick capture]]: {url}")]
-    (-> template
-        (string/replace "{time}" time)
-        (string/replace "{date}" date-ref-name)
-        (string/replace "{text}" "")
-        (string/replace "{url}" (or url "")))))
-
 (defn- handle-received-media [result]
   (p/let [{:keys [url]} result
-          page (or (state/get-current-page) (string/lower-case (date/journal-name)))
-          format (db/get-page-format page)]
-    (embed-asset-file url format)))
+          format :markdown]
+    (-> (embed-asset-file url format)
+        (p/catch (fn [error]
+                   (log/error :share-import-media-failed {:error error :url url})
+                   (notification/show! (t :mobile.share/media-import-error) :error false))))))
 
 (defn- handle-received-application [result]
-  (p/let [{:keys [title url type]} result
-          page (or (state/get-current-page) (string/lower-case (date/journal-name)))
-          format (db/get-page-format page)
+  (p/let [{:keys [url type]} result
+          today-page-title (db-async/<get-today-journal-title (state/get-current-repo))
+          page (or (state/get-current-page) (string/lower-case today-page-title))
+          format :markdown
           application-type (last (string/split type "/"))
           content (cond
-                    (common-config/mldoc-support? application-type)
-                    (embed-text-file url title)
-
                     (contains? (set/union config/doc-formats config/media-formats)
                                (keyword application-type))
                     (do
@@ -144,10 +145,11 @@
                     :else
                     (notification/show!
                      [:div
-                      (str "Import " application-type " file has not been supported. You can report it on ")
-                      [:a {:href "https://github.com/logseq/logseq/issues"
-                           :target "_blank"} "Github"]
-                      ". We will look into it soon."]
+                      (interpolate-rich-text-node
+                       (t :mobile.share/unsupported-import-type)
+                       [application-type
+                        [:a {:href "https://github.com/logseq/db-test/issues"
+                             :target "_blank"} "GitHub"]])]
                      :warning false))]
     (when content
       (if (state/get-edit-block)
@@ -173,16 +175,16 @@
   (-> (p/let [basename (node-path/basename url)
               _label (-> basename util/node-path.name)
               _path (assets-handler/get-asset-path basename)
-              file (.readFile Filesystem #js {:path url})
+              file (<filesystem-read-file url)
               file-base64-str (some-> file (.-data))
-              file (some-> file-base64-str (util/base64string-to-unit8array)
+              file (some-> file-base64-str (utils/base64ToUint8Array)
                            (vector) (clj->js) (js/File. basename #js {}))
               result (editor-handler/db-based-save-assets!
-                      (state/get-current-repo) [file] {})
-              asset-entity (first result)
-              url-link (util/format "[[%s]]" (:block/uuid asset-entity))]
-        url-link)
-      (p/catch #(log/error :handle-asset-file %))))
+                      (state/get-current-repo) [file] {})]
+        result)
+      (p/catch (fn [error]
+                 (log/error :handle-asset-file {:error error :url url})
+                 (notification/show! (t :mobile.share/file-import-error) :error false)))))
 
 (defn- handle-payload-resource
   [{:keys [type name ext url] :as resource} format]
@@ -195,10 +197,10 @@
       :else
       (notification/show!
        [:div
-        "Parsing current shared content are not supported. Please report the following codes on "
-        [:a {:href "https://github.com/logseq/logseq/issues/new?labels=from:in-app&template=bug_report.yaml"
-             :target "_blank"} "Github"]
-        ". We will look into it soon."
+        (interpolate-rich-text-node
+         (t :mobile.share/unsupported-content-warning)
+         [[:a {:href "https://github.com/logseq/db-test/issues/new?labels=from:in-app&template=bug_report.yaml"
+               :target "_blank"} "GitHub"]])
         [:pre.code (with-out-str (pprint/pprint resource))]] :warning false))
 
     (cond
@@ -208,31 +210,39 @@
       :else
       (notification/show!
        [:div
-        "Parsing current shared content are not supported. Please report the following codes on "
-        [:a {:href "https://github.com/logseq/logseq/issues/new?labels=from:in-app&template=bug_report.yaml"
-             :target "_blank"} "Github"]
-        ". We will look into it soon."
+        (interpolate-rich-text-node
+         (t :mobile.share/unsupported-content-warning)
+         [[:a {:href "https://github.com/logseq/db-test/issues/new?labels=from:in-app&template=bug_report.yaml"
+               :target "_blank"} "GitHub"]])
         [:pre.code (with-out-str (pprint/pprint resource))]] :warning false))))
 
 (defn handle-payload
   "Mobile share intent handler v2, use complex payload to support more types of content."
   [payload]
   ;; use :text template, use {url} as rich text placeholder
-  (p/let [page (or (state/get-current-page) (string/lower-case (date/journal-name)))
-          format (db/get-page-format page)
+  (p/let [today-page-title (db-async/<get-today-journal-title (state/get-current-repo))
+          page (or (state/get-current-page) (string/lower-case today-page-title))
+          format :markdown
 
           template (get-in (state/get-config)
                            [:quick-capture-templates :text]
-                           "**{time}** [[quick capture]]: {text} {url}")
+                           "**{time}** [[quick capture]]​ {text} {url}")
           {:keys [text resources]} payload
           text (or text "")
           rich-content (-> (p/all (map (fn [resource]
                                          (handle-payload-resource resource format))
                                        resources))
-                           (p/then (partial string/join "\n")))]
-    (when (not-empty text)
+                           (p/then (fn [result]
+                                     (when (every? string? result)
+                                       (string/join "\n" result)))))]
+    (when (and (or (not-empty text) (not-empty rich-content))
+               (not (every?
+                     (fn [resource]
+                       (contains? (set/union config/doc-formats config/media-formats)
+                                  (keyword (:ext resource))))
+                     resources)))
       (let [time (date/get-current-time)
-            date-ref-name (date/today)
+            date-ref-name today-page-title
             content (-> template
                         (string/replace "{time}" time)
                         (string/replace "{date}" date-ref-name)
@@ -274,10 +284,10 @@
         :else
         (notification/show!
          [:div
-          "Parsing current shared content are not supported. Please report the following codes on "
-          [:a {:href "https://github.com/logseq/logseq/issues/new?labels=from:in-app&template=bug_report.yaml"
-               :target "_blank"} "Github"]
-          ". We will look into it soon."
+          (interpolate-rich-text-node
+           (t :mobile.share/unsupported-content-warning)
+           [[:a {:href "https://github.com/logseq/db-test/issues/new?labels=from:in-app&template=bug_report.yaml"
+                 :target "_blank"} "GitHub"]])
           [:pre.code (with-out-str (pprint/pprint result))]] :warning false)))))
 
 (defn handle-received []

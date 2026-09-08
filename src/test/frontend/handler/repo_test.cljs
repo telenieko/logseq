@@ -1,76 +1,138 @@
 (ns frontend.handler.repo-test
-  (:require ["fs" :as fs]
-            ["path" :as node-path]
-            [cljs.test :refer [deftest use-fixtures testing is]]
-            [clojure.edn :as edn]
-            [datascript.core :as d]
-            [frontend.db.conn :as conn]
-            [frontend.db.model :as model]
-            [frontend.handler.file-based.repo :as file-repo-handler]
-            [frontend.test.helper :as test-helper :refer [load-test-files]]
-            [frontend.worker.state :as worker-state]
-            [logseq.common.util.block-ref :as block-ref]
-            [logseq.graph-parser.cli :as gp-cli]
-            [logseq.graph-parser.test.docs-graph-helper :as docs-graph-helper]))
+  (:require [cljs.test :refer [async deftest is]]
+            [frontend.db.persist :as db-persist]
+            [frontend.db.subs :as db-subs]
+            [frontend.handler.graph :as graph-handler]
+            [frontend.handler.notification :as notification]
+            [frontend.handler.repo :as repo-handler]
+            [frontend.handler.repo-config :as repo-config-handler]
+            [frontend.handler.route :as route-handler]
+            [frontend.handler.ui :as ui-handler]
+            [frontend.persist-db :as persist-db]
+            [frontend.search :as search]
+            [frontend.state :as state]
+            [promesa.core :as p]))
 
-(use-fixtures :each test-helper/start-and-destroy-db)
+(deftest create-db-does-not-start-renderer-db-conn-test
+  (async done
+    (let [calls (atom [])]
+      (-> (p/with-redefs [persist-db/<new
+                          (fn [repo opts]
+                            (swap! calls conj [:persist-new repo opts])
+                            (p/resolved nil))
+                          state/add-repo!
+                          (fn [repo]
+                            (swap! calls conj [:add-repo repo])
+                            (p/resolved nil))
+                          repo-handler/restore-and-setup-repo!
+                          (fn [repo opts]
+                            (swap! calls conj [:restore repo opts])
+                            (p/resolved nil))
+                          route-handler/redirect-to-home!
+                          (fn []
+                            (swap! calls conj [:redirect-home])
+                            nil)
+                          repo-config-handler/set-repo-config-state!
+                          (fn [repo _content]
+                            (swap! calls conj [:repo-config repo])
+                            nil)
+                          state/pub-event!
+                          (fn [event]
+                            (swap! calls conj [:event event])
+                            nil)
+                          ui-handler/re-render-root!
+                          (fn []
+                            (swap! calls conj [:rerender])
+                            nil)
+                          graph-handler/settle-metadata-to-local!
+                          (fn [metadata]
+                            (swap! calls conj [:metadata (keys metadata)])
+                            (p/resolved nil))]
+            (p/let [created (#'repo-handler/create-db "logseq_db_created" {})
+                    _ (do
+                        (is (= "logseq_db_created" created))
+                        (is (some #(= [:restore "logseq_db_created" {:file-graph-import? nil}] %) @calls))
+                        (is (some #{[:redirect-home]} @calls))
+                        (is (some #{[:rerender]} @calls))
+                        (reset! calls []))
+                    imported (#'repo-handler/create-db "logseq_db_imported" {:file-graph-import? true})]
+              (is (= "logseq_db_imported" imported))
+              (is (some #(= [:restore "logseq_db_imported" {:file-graph-import? true}] %) @calls))
+              (is (not-any? #{[:redirect-home] [:rerender]} @calls)
+                  "File-graph import must keep the Importing UI instead of leaving for home.")))
+          (p/catch
+           (fn [error]
+             (is false (str error))))
+          (p/finally done)))))
 
-(deftest ^:integration parse-and-load-files-to-db
-  (let [graph-dir "src/test/docs-0.10.12"
-        _ (docs-graph-helper/clone-docs-repo-if-not-exists graph-dir "v0.10.12")
-        repo-config (edn/read-string (str (fs/readFileSync (node-path/join graph-dir "logseq/config.edn"))))
-        files (#'gp-cli/build-graph-files graph-dir repo-config)
-        _ (with-redefs [worker-state/get-config (constantly repo-config)]
-            (file-repo-handler/parse-files-and-load-to-db! test-helper/test-db files {:re-render? false :verbose false}))
-        db (conn/get-db test-helper/test-db)]
+(deftest create-db-file-graph-import-rethrows-persist-failure-test
+  (async done
+    (let [shown (atom [])]
+      (-> (p/with-redefs [persist-db/<new
+                          (fn [_repo _opts]
+                            (p/rejected (ex-info "persist failed" {:code :persist-failed})))
+                          notification/show!
+                          (fn [content status & _]
+                            (swap! shown conj [content status]))
+                          repo-handler/restore-and-setup-repo!
+                          (fn [_repo _opts]
+                            (p/rejected (ex-info "restore must not run after persist failure"
+                                                 {:code :restore-ran})))
+                          state/<invoke-db-worker
+                          (fn [& _args]
+                            (p/rejected (ex-info "db-worker must not run in this test"
+                                                 {:code :db-worker-ran})))]
+            (#'repo-handler/create-db "logseq_db_import_fail" {:file-graph-import? true}))
+          (p/then (fn [_]
+                    (is false "File-graph import must not continue after graph creation fails.")))
+          (p/catch (fn [error]
+                     (is (= :persist-failed (:code (ex-data error))))
+                     (is (seq @shown)
+                         "Graph creation failure is shown to the user.")))
+          (p/finally done)))))
 
-    (docs-graph-helper/docs-graph-assertions db graph-dir (map :file/path files))
-    (testing "Additional Counts"
-      (is (= 58149 (count (d/datoms db :eavt))) "Correct datoms count")
-
-      (is (= 2065
-             (ffirst
-              (d/q '[:find (count ?b)
-                     :where [?b :block/refs ?bp] [?bp :block/name]] db)))
-          "Correct referenced blocks count"))))
-
-(deftest parse-files-and-load-to-db-with-block-refs-on-reload
-  (testing "Refs to blocks on a page are retained if that page is reloaded"
-    (let [test-uuid "16c90195-6a03-4b3f-839d-095a496d9acd"
-          target-page-content (str "- target block\n  id:: " test-uuid)
-          referring-page-content (str "- " (block-ref/->block-ref test-uuid))]
-      (load-test-files [{:file/path "pages/target.md"
-                         :file/content target-page-content}
-                        {:file/path "pages/referrer.md"
-                         :file/content referring-page-content}])
-      (is (= [(parse-uuid test-uuid)] (model/get-all-referenced-blocks-uuid)))
-
-      (load-test-files [{:file/path "pages/target.md"
-                         :file/content target-page-content}])
-      (is (= [(parse-uuid test-uuid)] (model/get-all-referenced-blocks-uuid))))))
-
-(deftest parse-files-and-load-to-db-with-page-rename
-  (testing
-   "Reload a file when the disk contents result in the file having a new page name"
-    (let [test-uuid "16c90195-6a03-4b3f-839d-095a496d9efc"
-          target-page-content (str "- target block\n  id:: " test-uuid)
-          referring-page-content (str "- " (block-ref/->block-ref test-uuid))
-          update-referring-page-content (str "title:: updatedPage\n- " (block-ref/->block-ref test-uuid))
-          get-page-block-count (fn [page-name]
-                                 (let [page-id (:db/id (model/get-page page-name))]
-                                   (if (some? page-id)
-                                     (model/get-page-blocks-count test-helper/test-db page-id)
-                                     0)))]
-      (load-test-files [{:file/path "pages/target.md"
-                         :file/content target-page-content}
-                        {:file/path "pages/referrer.md"
-                         :file/content referring-page-content}])
-      (is (= [(parse-uuid test-uuid)] (model/get-all-referenced-blocks-uuid)))
-      (is (= 1 (get-page-block-count "referrer")))
-      (is (= 0 (get-page-block-count "updatedPage")))
-
-      (load-test-files [{:file/path "pages/referrer.md"
-                         :file/content update-referring-page-content}])
-      (is (= [(parse-uuid test-uuid)] (model/get-all-referenced-blocks-uuid)))
-      (is (= 0 (get-page-block-count "referrer")))
-      (is (= 2 (get-page-block-count "updatedPage"))))))
+(deftest removing-current-repo-pauses-renderer-subscriptions-test
+  (async done
+         (let [repo {:url "logseq_db_current"}
+               repos (atom [repo])
+               calls (atom [])]
+           (-> (p/with-redefs [state/get-repos (fn [] @repos)
+                               state/get-current-repo (fn [] (:url repo))
+                               persist-db/<close-db
+                               (fn [graph-id]
+                                 (swap! calls conj [:close graph-id])
+                                 (p/resolved nil))
+                               db-persist/delete-graph!
+                               (fn [graph-id]
+                                 (swap! calls conj [:delete-db graph-id])
+                                 (p/resolved nil))
+                               search/remove-db!
+                               (fn [graph-id]
+                                 (swap! calls conj [:remove-search graph-id])
+                                 nil)
+                               state/delete-repo!
+                               (fn [removed-repo]
+                                 (swap! calls conj [:delete-repo removed-repo])
+                                 (reset! repos []))
+                               state/set-current-repo!
+                               (fn [graph-id]
+                                 (swap! calls conj [:set-current graph-id])
+                                 nil)
+                               db-subs/reset-graph!
+                               (fn [graph-id]
+                                 (swap! calls conj [:reset-subscriptions graph-id])
+                                 nil)]
+                 (repo-handler/remove-repo! repo))
+               (p/then
+                (fn []
+                  (is (= [[:close (:url repo)]
+                          [:delete-db (:url repo)]
+                          [:remove-search (:url repo)]
+                          [:delete-repo repo]
+                          [:set-current nil]
+                          [:reset-subscriptions nil]]
+                         @calls))))
+               (p/catch
+                (fn [error]
+                  (is false (str error))))
+               (p/finally done)))))
